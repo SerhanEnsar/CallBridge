@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Network
 import SwiftUI
 import UserNotifications
 
@@ -32,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var ringer: NSSound?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--audio-selftest") {
+            audioSelfTest()
+            return
+        }
         // tel: bağlantıları (tarayıcıda ya da Kişiler'de bir numaraya tıklayınca)
         NSAppleEventManager.shared().setEventHandler(
             self, andSelector: #selector(openURL(_:withReply:)),
@@ -56,6 +61,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let number = (url.absoluteString.dropFirst(4).removingPercentEncoding ?? "")
         bridge.dial(number)
         showCallWindow()
+    }
+
+    /// Ses yolunu tablet olmadan dener: kendi 47124 portuna 2 sn 440 Hz bip gönderir, çalar ve
+    /// sayaçları loglar (CallBridge.app/Contents/MacOS/CallBridge --audio-selftest).
+    private func audioSelfTest() {
+        let audio = CallAudio()
+        audio.start(host: "127.0.0.1")
+        let out = NWConnection(host: "127.0.0.1", port: 47124, using: .udp)
+        out.start(queue: .global())
+        var seq: UInt32 = 0
+        var t = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+            var packet = Data(count: 4)
+            packet[0] = UInt8(seq >> 24 & 0xff); packet[1] = UInt8(seq >> 16 & 0xff)
+            packet[2] = UInt8(seq >> 8 & 0xff); packet[3] = UInt8(seq & 0xff)
+            var frame = [Int16](repeating: 0, count: 320)
+            for i in 0..<320 {
+                frame[i] = Int16(sin(2 * .pi * 440 * t) * 8000)
+                t += 1 / 16000
+            }
+            frame.withUnsafeBufferPointer { packet.append(Data(buffer: $0)) }
+            out.send(content: packet, completion: .idempotent)
+            seq += 1
+            if seq >= 100 { timer.invalidate() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            blog("öz test bitti: \(seq) gönderildi, \(audio.packets) alındı, \(audio.dropped) atlandı")
+            audio.stop()
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: - çağrı

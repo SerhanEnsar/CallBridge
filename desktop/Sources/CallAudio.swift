@@ -6,6 +6,21 @@ import Network
 /// 20 ms PCM (16 kHz, mono, 16 bit, little-endian).
 ///   tablet → Mac (47124): karşı tarafın sesi, burada çalınır
 ///   Mac → tablet (47125): Mac'in mikrofonu (macOS ses işlemesiyle yankı engellenmiş)
+/// ~/Library/Logs/CallBridge.log: ses ve bağlantı olayları (sorun giderme için).
+func blog(_ s: String) {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/CallBridge.log")
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    let line = "\(f.string(from: Date())) \(s)\n"
+    if let h = try? FileHandle(forWritingTo: url) {
+        h.seekToEndOfFile()
+        h.write(Data(line.utf8))
+        try? h.close()
+    } else {
+        try? Data(line.utf8).write(to: url)
+    }
+}
+
 final class CallAudio {
     static let rate = 16000.0
     static let frame = 320 // 20 ms
@@ -15,6 +30,8 @@ final class CallAudio {
     var muted = false
     private(set) var packets = 0
     private(set) var dropped = 0
+    private(set) var sent = 0
+    private var statsTimer: Timer?
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -36,49 +53,94 @@ final class CallAudio {
         running = true
         packets = 0
         dropped = 0
+        sent = 0
         muted = false
         queued = 0
         pending = []
+        blog("ses başlıyor → \(host), mikrofon izni: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) (3=izinli)")
 
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        let input = engine.inputNode
-        try? input.setVoiceProcessingEnabled(true) // yankı engelleme ve gürültü azaltma
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: playFormat)
-        let inFormat = input.outputFormat(forBus: 0)
-        converter = AVAudioConverter(from: inFormat, to: micFormat)
-        input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buf, _ in self?.mic(buf) }
+        // Gelen sesi dinlemeye önce başla: ses motoru açılmasa da paketler sayılsın
         do {
-            try engine.start()
-        } catch {
-            NSLog("CallBridge: ses başlatılamadı: \(error)")
-            running = false
-            return
-        }
-        player.play()
-        self.engine = engine
-        self.player = player
-
-        let out = NWConnection(host: NWEndpoint.Host(host), port: 47125, using: .udp)
-        out.start(queue: q)
-        outbound = out
-
-        if let l = try? NWListener(using: .udp, on: 47124) {
+            let l = try NWListener(using: .udp, on: 47124)
+            l.stateUpdateHandler = { st in blog("UDP 47124 dinleyici: \(st)") }
             l.newConnectionHandler = { [weak self] c in
                 guard let self else { return }
+                blog("ses akışı geldi: \(c.endpoint)")
                 self.inbound.append(c)
                 c.start(queue: self.q)
                 self.receive(c)
             }
             l.start(queue: q)
             listener = l
+        } catch {
+            blog("UDP 47124 açılamadı: \(error)")
         }
+
+        let out = NWConnection(host: NWEndpoint.Host(host), port: 47125, using: .udp)
+        out.start(queue: q)
+        outbound = out
+
+        // Önce yankı engellemeyle; olmazsa onsuz (ses yine de gelsin)
+        if !startEngine(voiceProcessing: true) {
+            blog("yankı engellemesiz yeniden deneniyor")
+            _ = startEngine(voiceProcessing: false)
+        }
+
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            blog("ses: ↓ \(self.packets) paket (\(self.dropped) atlandı), ↑ \(self.sent) paket")
+        }
+    }
+
+    /**
+     * Ses motorunu kurar. macOS'te ses işleme (voice processing), çıkış tarafı kurulmadan açılırsa
+     * çıkış 0 kanallı kalır ve motor -10875 ile başlamaz; bu yüzden önce oynatıcı → karıştırıcı →
+     * çıkış bağlanır, sonra ses işleme açılır.
+     */
+    private func startEngine(voiceProcessing: Bool) -> Bool {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+        let input = engine.inputNode
+        if voiceProcessing {
+            do {
+                try input.setVoiceProcessingEnabled(true) // yankı engelleme ve gürültü azaltma
+            } catch {
+                blog("ses işleme açılamadı: \(error)")
+                return false
+            }
+        }
+        let inFormat = input.outputFormat(forBus: 0)
+        blog("giriş: \(inFormat.channelCount) kanal \(Int(inFormat.sampleRate)) Hz, çıkış: \(engine.outputNode.outputFormat(forBus: 0).channelCount) kanal, ses işleme: \(voiceProcessing)")
+        converter = AVAudioConverter(from: inFormat, to: micFormat)
+        if converter == nil { blog("mikrofon dönüştürücüsü kurulamadı") }
+        if inFormat.sampleRate > 0 && inFormat.channelCount > 0 {
+            input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buf, _ in self?.mic(buf) }
+        }
+        do {
+            try engine.start()
+        } catch {
+            blog("ses motoru başlatılamadı: \(error)")
+            input.removeTap(onBus: 0)
+            if voiceProcessing { try? input.setVoiceProcessingEnabled(false) }
+            return false
+        }
+        player.play()
+        self.engine = engine
+        self.player = player
+        blog("ses motoru başladı")
+        return true
     }
 
     func stop() {
         guard running else { return }
         running = false
+        statsTimer?.invalidate()
+        statsTimer = nil
+        blog("ses durdu: ↓ \(packets) paket (\(dropped) atlandı), ↑ \(sent) paket")
         engine?.inputNode.removeTap(onBus: 0)
         player?.stop()
         engine?.stop()
@@ -104,6 +166,7 @@ final class CallAudio {
     }
 
     private func play(_ pcm: Data) {
+        packets += 1 // ses motoru açılmamış olsa da gelen paketi say
         guard let player else { return }
         let n = pcm.count / 2
         lock.lock()
@@ -121,7 +184,6 @@ final class CallAudio {
             let s = raw.bindMemory(to: Int16.self)
             for i in 0..<n { out[i] = Float(Int16(littleEndian: s[i])) / 32768 }
         }
-        packets += 1
         player.scheduleBuffer(buf) { [weak self] in
             guard let self else { return }
             self.lock.lock()
@@ -159,6 +221,7 @@ final class CallAudio {
             packet[2] = UInt8(seq >> 8 & 0xff); packet[3] = UInt8(seq & 0xff)
             frame.withUnsafeBufferPointer { packet.append(Data(buffer: $0)) }
             seq &+= 1
+            sent += 1
             outbound?.send(content: packet, completion: .idempotent)
         }
     }

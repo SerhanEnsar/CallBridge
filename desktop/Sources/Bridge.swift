@@ -234,6 +234,7 @@ final class BridgeClient: ObservableObject {
             }
         case "audio":
             let active = m["active"] as? Bool ?? false
+            blog("tablet: ses aktarımı \(active ? "bu Mac'e başladı" : "bu Mac'te değil")\((m["error"] as? String).map { " · \($0)" } ?? "")")
             if audioActive && !active && call?.state == "offhook" { audioReleased = true }
             audioActive = active
             audioError = (m["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -278,6 +279,9 @@ final class BridgeClient: ObservableObject {
     private func setCall(_ new: CallState?) {
         let prev = call
         call = new
+        if prev?.state != new?.state || prev?.answeredBy != new?.answeredBy || prev?.audioTo != new?.audioTo {
+            blog("çağrı: \(new.map { "\($0.state), açan=\($0.answeredBy ?? "—"), ses=\($0.audioTo ?? "—")\($0.test ? ", test" : "")" } ?? "yok")")
+        }
         if new == nil {
             audioReleased = false
             audioActive = false
@@ -308,6 +312,7 @@ final class BridgeClient: ObservableObject {
 
     private func syncAudio() {
         if audioHere, let ip = hostIP, call?.test == false {
+            if !audio.running { blog("ses bu Mac'te (aktarım: \(audioActive ? "başladı" : "bekleniyor"))") }
             audio.start(host: ip)
         } else {
             audio.stop()
