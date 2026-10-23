@@ -3,6 +3,7 @@ package com.serhanensar.callbridge
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -63,7 +64,18 @@ class BridgeActivity : Activity() {
             Bridge.prefs(this).edit().putString("pin", Bridge.newPin()).apply()
         }
         setContentView(buildUi())
+        syncDialerLauncher()
         if (intent.getBooleanExtra(EXTRA_START, false)) startFromIntent()
+    }
+
+    /** Başlatıcıdaki "Ara" simgesi yalnızca telefon rolünde görünsün. */
+    private fun syncDialerLauncher() {
+        val alias = ComponentName(this, "$packageName.DialerLauncher")
+        val want = if (Bridge.role(this) == Bridge.ROLE_CLIENT) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        else PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+        if (packageManager.getComponentEnabledSetting(alias) != want) {
+            packageManager.setComponentEnabledSetting(alias, want, PackageManager.DONT_KILL_APP)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -101,6 +113,8 @@ class BridgeActivity : Activity() {
         if (role == Bridge.ROLE_HOST && Bridge.pin(this).length != 6) {
             Bridge.prefs(this).edit().putString("pin", Bridge.newPin()).apply()
         }
+        syncDialerLauncher()
+        if (role == Bridge.ROLE_HOST) try { PhoneAccounts.unregister(this) } catch (_: Exception) {}
         render()
     }
 
@@ -236,6 +250,7 @@ class BridgeActivity : Activity() {
     private fun hostPerms() = listOf(
         runtime("Telefon durumu (zorunlu)", Manifest.permission.READ_PHONE_STATE),
         runtime("Çağrı yanıtlama / kapatma (zorunlu)", Manifest.permission.ANSWER_PHONE_CALLS),
+        runtime("Arama yapma (telefondan aramak için)", Manifest.permission.CALL_PHONE),
         runtime("Arama kaydı (arayanın numarası)", Manifest.permission.READ_CALL_LOG),
         runtime("Rehber (arayanın adı)", Manifest.permission.READ_CONTACTS),
         Perm(
@@ -250,6 +265,14 @@ class BridgeActivity : Activity() {
     private fun clientPerms() = buildList {
         add(notificationPerm())
         add(runtime("Mikrofon (telefondan konuşmak)", Manifest.permission.RECORD_AUDIO))
+        add(runtime("Rehber (arama ekranında kişiler)", Manifest.permission.READ_CONTACTS))
+        add(
+            Perm(
+                "Arama hesabı: rehberden CallBridge ile ara",
+                granted = { PhoneAccounts.isEnabled(this@BridgeActivity) },
+                request = { startActivity(PhoneAccounts.settingsIntent()) },
+            )
+        )
         if (Build.VERSION.SDK_INT >= 34) {
             add(
                 Perm(
@@ -374,6 +397,15 @@ class BridgeActivity : Activity() {
         addView(clientToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)).apply { bottomMargin = dp(8) })
         clientStatus = label("", 14f, c.secondary).apply { gravity = Gravity.CENTER }
         addView(clientStatus, matchWidth(bottom = 14))
+
+        addView(
+            label("Ara: tuş takımı ve rehber", 17f, 0xFFFFFFFF.toInt(), bold = true).apply {
+                gravity = Gravity.CENTER
+                background = rounded(c.green, 12f)
+                setOnClickListener { startActivity(Intent(this@BridgeActivity, DialerActivity::class.java)) }
+            },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply { bottomMargin = dp(10) },
+        )
 
         testButton = label("Test çağrısı", 17f, c.text).apply {
             gravity = Gravity.CENTER

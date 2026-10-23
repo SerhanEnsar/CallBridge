@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
@@ -45,6 +46,41 @@
             </intent-filter>
         </activity>
 
+        <!-- Telefon: tuş takımı ve rehber. tel: bağlantılarını ve arama isteklerini karşılar;
+             arama her zaman kullanıcının Ara'ya basmasıyla başlar. -->
+        <activity
+            android:name=".DialerActivity"
+            android:exported="true"
+            android:label="CallBridge ile ara"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.CALL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tel" />
+            </intent-filter>
+        </activity>
+
+        <!-- Yalnızca telefon rolünde açılır: başlatıcıda ayrı "Ara" simgesi -->
+        <activity-alias
+            android:name=".DialerLauncher"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="Ara"
+            android:targetActivity=".DialerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
         <activity
             android:name=".IncomingCallActivity"
             android:exported="false"
@@ -56,6 +92,16 @@
             android:name=".CallHostService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Telefon: "CallBridge" arama hesabı; rehberden yapılan aramalar buraya gelir -->
+        <service
+            android:name=".BridgeConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".BridgeClientService"

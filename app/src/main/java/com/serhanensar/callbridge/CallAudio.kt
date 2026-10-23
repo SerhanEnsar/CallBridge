@@ -57,9 +57,17 @@ class CallAudio(
 
     val isRunning get() = running
 
+    /**
+     * true: çağrı Android'in arama sistemi (Telecom) üzerinden; ses modunu ve yönünü
+     * (ahize/hoparlör/Bluetooth) sistemin çağrı ekranı yönetir, burada dokunulmaz.
+     */
+    @Volatile var systemRouted = false
+        private set
+
     @Synchronized
-    fun start() {
+    fun start(systemRouted: Boolean = false) {
         if (running) return
+        this.systemRouted = systemRouted
         running = true
         packets = 0
         micPackets = 0
@@ -79,7 +87,7 @@ class CallAudio(
 
     fun setSpeaker(on: Boolean) {
         speaker = on
-        if (running) applyRoute()
+        if (running && !systemRouted) applyRoute()
     }
 
     private fun receiveLoop() {
@@ -101,9 +109,15 @@ class CallAudio(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         val prevMode = audio.mode
+        val managed = !systemRouted
         try {
-            audio.mode = AudioManager.MODE_IN_COMMUNICATION
-            applyRoute()
+            if (managed) {
+                audio.mode = AudioManager.MODE_IN_COMMUNICATION
+                applyRoute()
+            } else {
+                route = ROUTE_SYSTEM
+                onRoute(route)
+            }
             val s = DatagramSocket(null).apply {
                 reuseAddress = true
                 soTimeout = 1000
@@ -139,8 +153,10 @@ class CallAudio(
             socket = null
             try { track.stop() } catch (_: Exception) {}
             track.release()
-            if (Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice()
-            audio.mode = prevMode
+            if (managed) {
+                if (Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice()
+                audio.mode = prevMode
+            }
             route = "—"
             onRoute(route)
             Log.i(Bridge.TAG, "Ses alımı bitti, $packets paket")
@@ -237,5 +253,6 @@ class CallAudio(
         const val FRAME_BYTES = RATE / 50 * 2 // 20 ms
         const val ROUTE_SPEAKER = "hoparlör"
         const val ROUTE_EARPIECE = "ahize"
+        const val ROUTE_SYSTEM = "sistem"
     }
 }

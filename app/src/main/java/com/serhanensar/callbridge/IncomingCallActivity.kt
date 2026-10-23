@@ -78,8 +78,9 @@ class IncomingCallActivity : Activity() {
         status.setTextIfChanged(when {
             ringing -> "Tablete gelen çağrı" + if (call.test) " (test)" else ""
             else -> {
+                // Tablet giden aramada karşı tarafın ne zaman açtığını bilmiyor; süre aramadan sayılır
                 val s = (System.currentTimeMillis() - call.since) / 1000
-                "Görüşmede  %d:%02d".format(s / 60, s % 60)
+                (if (call.outgoing) "Giden arama  " else "Görüşmede  ") + "%d:%02d".format(s / 60, s % 60)
             }
         })
         ringingRow.setShown(ringing)

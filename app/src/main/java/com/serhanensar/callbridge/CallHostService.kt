@@ -15,6 +15,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
@@ -52,6 +53,7 @@ class CallHostService : Service() {
     private var name: String? = null
     private var test = false
     private var speaker = false
+    private var outgoing = false // telefondan istenen giden arama
     private var ringMutedByUs = false
 
     private val phoneReceiver = object : BroadcastReceiver() {
@@ -185,7 +187,7 @@ class CallHostService : Service() {
                     "ping" -> line.send(Bridge.msg("pong"))
                     "cmd" -> {
                         val cmd = m.optString("cmd")
-                        val error = execute(cmd, peer)
+                        val error = execute(cmd, peer, m)
                         Log.i(Bridge.TAG, "Komut $cmd: ${error ?: "tamam"}")
                         line.send(Bridge.msg("result", "cmd" to cmd, "ok" to (error == null), "error" to error))
                     }
@@ -212,6 +214,7 @@ class CallHostService : Service() {
             "muted" to (state == Bridge.STATE_OFFHOOK && audio.isMicrophoneMute),
             "speaker" to speaker,
             "test" to test,
+            "outgoing" to outgoing,
         )
     }
 
@@ -234,6 +237,7 @@ class CallHostService : Service() {
                 number = null
                 name = null
                 speaker = false
+                outgoing = false
             }
         }
         if (silenceNow) silenceRinger()
@@ -300,7 +304,7 @@ class CallHostService : Service() {
     // ---- komutlar ----
 
     /** Komutu uygular; hata varsa açıklamasını döndürür. */
-    private fun execute(cmd: String, peer: Peer): String? {
+    private fun execute(cmd: String, peer: Peer, m: JSONObject): String? {
         if (cmd == "test") return startTest()
         if (synchronized(this) { test }) return executeTest(cmd)
         return try {
@@ -309,6 +313,22 @@ class CallHostService : Service() {
                     if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) return "Tablette çağrı yanıtlama izni yok"
                     audioPeer = peer // görüşme başlayınca ses bu telefona gelir
                     telecom.acceptRingingCall()
+                    null
+                }
+                "dial" -> {
+                    if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+                        return "Tablette arama izni yok"
+                    }
+                    val n = m.optString("number").filter { it.isDigit() || it in "+*#" }
+                    if (n.isEmpty()) return "Numara boş"
+                    synchronized(this) {
+                        if (state != Bridge.STATE_IDLE) return "Tablette süren bir çağrı var"
+                        number = n
+                        name = contactName(n) ?: m.optString("name").ifEmpty { null }
+                        outgoing = true
+                    }
+                    audioPeer = peer // görüşme başlayınca ses bu telefona gelir
+                    telecom.placeCall(Uri.fromParts("tel", n, null), Bundle())
                     null
                 }
                 "audio_on" -> {

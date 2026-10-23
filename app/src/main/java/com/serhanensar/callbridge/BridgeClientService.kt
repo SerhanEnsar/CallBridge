@@ -11,6 +11,7 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.telecom.DisconnectCause
 import android.util.Log
 import org.json.JSONObject
 import java.net.Inet4Address
@@ -40,6 +41,7 @@ class BridgeClientService : Service() {
         val speaker: Boolean,
         val test: Boolean,
         val since: Long,
+        val outgoing: Boolean = false,
     ) {
         val title get() = name ?: number ?: "Bilinmeyen numara"
     }
@@ -98,6 +100,7 @@ class BridgeClientService : Service() {
         }
         running = true
         instance = this
+        try { PhoneAccounts.register(this) } catch (e: Exception) { Log.w(Bridge.TAG, "Arama hesabı kaydedilemedi: $e") }
         pinger = Executors.newSingleThreadScheduledExecutor().also {
             it.scheduleWithFixedDelay({ line?.send(Bridge.msg("ping")) }, PING_MS, PING_MS, TimeUnit.MILLISECONDS)
         }
@@ -118,15 +121,41 @@ class BridgeClientService : Service() {
         stopSelf()
     }
 
-    fun send(cmd: String): Boolean {
+    fun send(cmd: String, vararg extra: Pair<String, Any?>): Boolean {
         // Telefonun kendi zili hemen dursun; tabletin zili için komut ayrıca gider
         if (cmd == "silence" || cmd == "accept" || cmd == "end") {
             if (call?.state == Bridge.STATE_RINGING) ringSilenced = true
             ringer.stop()
         }
-        val ok = line?.send(Bridge.msg("cmd", "cmd" to cmd)) == true
+        val ok = line?.send(Bridge.msg("cmd", "cmd" to cmd, *extra)) == true
         if (!ok) lastResult = "Tablete bağlı değil"
         return ok
+    }
+
+    /**
+     * Tabletin bu numarayı aramasını ister. Çağrı hemen giden arama olarak kurulur (çağrı ekranı
+     * açılınca bulabilsin); tablet aramayı başlatamazsa geri alınır.
+     */
+    /** Sistemin çağrı ekranındaki giden arama (rehberden yapılan); null ise çağrı bizim ekranımızda. */
+    @Volatile private var connection: BridgeConnection? = null
+
+    private fun beginDial(number: String, name: String?, conn: BridgeConnection? = null): Boolean {
+        if (line == null) {
+            lastResult = "Tablete bağlı değil"
+            return false
+        }
+        if (call != null) {
+            lastResult = "Süren bir çağrı var"
+            return false
+        }
+        lastResult = null
+        connection = conn
+        setCall(Call(Bridge.STATE_OFFHOOK, number, name, muted = false, speaker = false, test = false,
+            since = System.currentTimeMillis(), outgoing = true))
+        thread(isDaemon = true) {
+            if (!send("dial", "number" to number, "name" to name)) setCall(null)
+        }
+        return true
     }
 
     // ---- bağlantı ----
@@ -180,7 +209,21 @@ class BridgeClientService : Service() {
                 val m = l.read() ?: break
                 when (m.optString("t")) {
                     "state" -> onState(m)
-                    "result" -> lastResult = if (m.optBoolean("ok")) null else m.optString("error", "Komut başarısız")
+                    "result" -> {
+                        val ok = m.optBoolean("ok")
+                        lastResult = if (ok) null else m.optString("error", "Komut başarısız")
+                        if (m.optString("cmd") == "dial" && call?.outgoing == true) {
+                            if (ok) {
+                                connection?.connected()
+                            } else {
+                                val error = lastResult
+                                connection?.finish(DisconnectCause.ERROR, error)
+                                connection = null
+                                setCall(null)
+                                lastResult = error // setCall(null) siler; arama ekranı gösterebilsin
+                            }
+                        }
+                    }
                     "audio" -> {
                         audioActive = m.optBoolean("active")
                         audioError = m.optString("error").ifEmpty { null }
@@ -201,12 +244,13 @@ class BridgeClientService : Service() {
         setCall(
             Call(
                 state = state,
-                number = m.optString("number").ifEmpty { null },
-                name = m.optString("name").ifEmpty { null },
+                number = m.optString("number").ifEmpty { null } ?: prev?.number,
+                name = m.optString("name").ifEmpty { null } ?: prev?.name,
                 muted = m.optBoolean("muted"),
                 speaker = m.optBoolean("speaker"),
                 test = m.optBoolean("test"),
                 since = since,
+                outgoing = m.optBoolean("outgoing"),
             )
         )
     }
@@ -216,9 +260,13 @@ class BridgeClientService : Service() {
         call = new
         if (new?.state != Bridge.STATE_RINGING || prev?.state != Bridge.STATE_RINGING) ringSilenced = false
         if (new?.state != Bridge.STATE_RINGING) ringer.stop()
-        if (new?.state == Bridge.STATE_OFFHOOK) callAudio.start() else {
+        if (new?.state == Bridge.STATE_OFFHOOK) callAudio.start(systemRouted = connection != null) else {
             callAudio.stop()
             updateProximity("—")
+        }
+        if (new == null) {
+            connection?.finish(DisconnectCause.REMOTE)
+            connection = null
         }
         if (prev?.state == Bridge.STATE_OFFHOOK && new?.state != Bridge.STATE_OFFHOOK && running) {
             showForeground(CallNotifier.status(this, status, connected = line != null), microphone = false)
@@ -351,6 +399,26 @@ class BridgeClientService : Service() {
                 return
             }
             thread(isDaemon = true) { s.send(cmd) }
+        }
+
+        /** Rehberden/sistem tuş takımından gelen arama; çağrı sistemin ekranında sürer. */
+        fun dialFromSystem(number: String, conn: BridgeConnection): Boolean {
+            val s = instance
+            if (s == null) {
+                lastResult = "CallBridge köprüsü kapalı"
+                return false
+            }
+            return s.beginDial(number, null, conn)
+        }
+
+        /** Arama başladıysa true; değilse nedeni lastResult'ta. */
+        fun dial(number: String, name: String?): Boolean {
+            val s = instance
+            if (s == null) {
+                lastResult = "Köprü kapalı"
+                return false
+            }
+            return s.beginDial(number, name)
         }
 
         fun gateway(ctx: Context): InetAddress? {
