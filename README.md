@@ -45,6 +45,19 @@ Aktarıcı tablet yeniden başlayana kadar çalışır. Her açılıştan sonra 
 
 Aktarıcı kapalıysa çağrı yine telefondan yönetilir, ama ses tablette kalır.
 
+## Mac uygulaması
+
+`desktop/` klasöründe, menü çubuğunda duran bir Mac uygulaması var. Tablete gelen çağrı Mac'te de çalar; sağ üstte küçük bir çağrı penceresi ve bildirim çıkar. Çağrı Mac'ten yanıtlanır, Mac'in mikrofonu ve hoparlörüyle konuşulur. Arama da Mac'ten yapılır: son aramalar (tabletten), rehber (Mac'in Kişiler'i) ve tuş takımı. Mac'te bir telefon numarasına tıklamak da CallBridge ile arar.
+
+Telefon ve Mac aynı anda bağlıyken gelen arama ikisinde birden çalar. Hangisinden yanıtlanırsa ses oraya gelir, diğerinde "Bu cihaza al" çıkar. Tablette yanıtlanan çağrının sesi tablette kalır.
+
+```bash
+cd desktop
+./build.sh --install --run   # derler, /Applications'a kurar ve açar
+```
+
+Mac tabletin hotspot'una bağlı olmalı. PIN menüdeki Ayarlar'dan girilir.
+
 ## Hotspot TTL ile birlikte
 
 [Hotspot TTL](../HotspotTTL) telefonda açıkken CallBridge'i VPN'in dışında tutar, böylece tablete giden bağlantı VPN'den geçmez.
