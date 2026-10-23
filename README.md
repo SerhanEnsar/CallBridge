@@ -102,3 +102,7 @@ app/src/main/java/com/serhanensar/callbridge/
 ├── BootReceiver.kt         # açılışta yeniden başlatma
 └── Ui.kt                   # renkler ve arayüz yardımcıları
 ```
+
+## Lisans
+
+[Apache Lisansı 2.0](LICENSE). Telif: 2026 SerhanEnsar (bkz. [NOTICE](NOTICE)).
