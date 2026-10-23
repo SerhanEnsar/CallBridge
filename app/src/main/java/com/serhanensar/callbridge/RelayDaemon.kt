@@ -139,6 +139,7 @@ object RelayDaemon {
         private var prevVolume = -1
         private var downPackets = 0L
         private var upPackets = 0L
+        private var upDropped = 0L
 
         fun start() {
             val record = AudioRecord.Builder()
@@ -156,6 +157,7 @@ object RelayDaemon {
                 )
                 .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
                 .setBufferSizeInBytes(FRAME * 2 * 6)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .build()
             val tx = telephonyTx() ?: run {
                 record.release()
@@ -183,7 +185,7 @@ object RelayDaemon {
             try { setMicMute(false) } catch (_: Exception) {}
             if (prevVolume >= 0) try { setVoiceVolume(prevVolume) } catch (_: Exception) {}
             if (session === this) session = null
-            log("aktarım durdu ($reason): $downPackets paket gitti, $upPackets paket geldi")
+            log("aktarım durdu ($reason): $downPackets paket gitti, $upPackets paket geldi, gecikme için $upDropped atlandı")
         }
 
         private fun downlink(rec: AudioRecord) {
@@ -220,7 +222,8 @@ object RelayDaemon {
             val p = DatagramPacket(buf, buf.size)
             try {
                 track.play()
-                track.write(ByteArray(FRAME * 2 * 2), 0, FRAME * 2 * 2)
+                track.write(ByteArray(FRAME * 2), 0, FRAME * 2)
+                var written = FRAME.toLong() // yazılan örnek sayısı
                 while (running) {
                     try {
                         sock.receive(p)
@@ -228,7 +231,15 @@ object RelayDaemon {
                         continue
                     }
                     if (p.address != phone || p.length <= 4) continue // yalnızca bağlı telefondan
-                    track.write(buf, 4, p.length - 4)
+                    // Gecikme birikmesin: çalınmayı bekleyen ses 100 ms'yi aştıysa bu paketi atla
+                    val queued = written - (track.playbackHeadPosition.toLong() and 0xffffffffL)
+                    if (queued > RATE / 10) {
+                        upDropped++
+                        continue
+                    }
+                    val n = p.length - 4
+                    track.write(buf, 4, n)
+                    written += n / 2
                     upPackets++
                 }
             } catch (e: Exception) {

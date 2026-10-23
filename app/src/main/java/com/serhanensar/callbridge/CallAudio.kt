@@ -45,6 +45,8 @@ class CallAudio(
 
     @Volatile var speaker = false
         private set
+    @Volatile var dropped = 0L
+        private set
     @Volatile var muted = false
     @Volatile var micPackets = 0L
         private set
@@ -70,6 +72,7 @@ class CallAudio(
         this.systemRouted = systemRouted
         running = true
         packets = 0
+        dropped = 0
         micPackets = 0
         micError = null
         muted = false
@@ -107,6 +110,7 @@ class CallAudio(
             )
             .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT), FRAME_BYTES * 6))
             .setTransferMode(AudioTrack.MODE_STREAM)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
         val prevMode = audio.mode
         val managed = !systemRouted
@@ -126,7 +130,8 @@ class CallAudio(
             network()?.bindSocket(s)
             socket = s
             track.play()
-            track.write(ByteArray(FRAME_BYTES * 3), 0, FRAME_BYTES * 3) // ilk paketler gelene kadar boşluk
+            track.write(ByteArray(FRAME_BYTES * 2), 0, FRAME_BYTES * 2) // ilk paketler gelene kadar boşluk
+            var written = 2L * FRAME_BYTES / 2 // yazılan örnek sayısı
             val buf = ByteArray(HEADER + FRAME_BYTES * 4)
             val packet = DatagramPacket(buf, buf.size)
             var lastSeq = -1
@@ -142,7 +147,15 @@ class CallAudio(
                     ((buf[2].toInt() and 0xff) shl 8) or (buf[3].toInt() and 0xff)
                 if (seq <= lastSeq && lastSeq - seq < 1000) continue // geç gelen ya da yinelenen paket
                 lastSeq = seq
-                track.write(buf, HEADER, packet.length - HEADER)
+                // Gecikme birikmesin: çalınmayı bekleyen ses MAX_QUEUE_MS'yi aştıysa bu paketi atla
+                val queued = written - (track.playbackHeadPosition.toLong() and 0xffffffffL)
+                if (queued > RATE * MAX_QUEUE_MS / 1000) {
+                    dropped++
+                    continue
+                }
+                val n = packet.length - HEADER
+                track.write(buf, HEADER, n)
+                written += n / 2
                 packets++
             }
         } catch (e: Exception) {
@@ -159,7 +172,7 @@ class CallAudio(
             }
             route = "—"
             onRoute(route)
-            Log.i(Bridge.TAG, "Ses alımı bitti, $packets paket")
+            Log.i(Bridge.TAG, "Ses alımı bitti, $packets paket, gecikme için $dropped atlandı")
         }
     }
 
@@ -251,6 +264,7 @@ class CallAudio(
         const val RATE = 16000
         const val HEADER = 4
         const val FRAME_BYTES = RATE / 50 * 2 // 20 ms
+        const val MAX_QUEUE_MS = 100 // bundan fazla birikirse paket atlanır
         const val ROUTE_SPEAKER = "hoparlör"
         const val ROUTE_EARPIECE = "ahize"
         const val ROUTE_SYSTEM = "sistem"

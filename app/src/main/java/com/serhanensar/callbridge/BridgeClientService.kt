@@ -177,11 +177,29 @@ class BridgeClientService : Service() {
                     if (!pinFailed) setStatus("Bağlantı yok: ${e.message ?: e.javaClass.simpleName}")
                 }
                 line = null
-                setCall(null)
+                onLinkLost()
             }
             if (!running) break
-            try { Thread.sleep(delay) } catch (_: InterruptedException) { break }
+            // Görüşme sürerken kısa kopmalar çağrıyı bitirmesin: hemen yeniden bağlan, 10 sn bekle
+            val inCall = call?.state == Bridge.STATE_OFFHOOK
+            if (inCall && lostAt != 0L && System.currentTimeMillis() - lostAt > LINK_GRACE_MS) {
+                Log.w(Bridge.TAG, "Tablete ${LINK_GRACE_MS / 1000} sn bağlanılamadı, çağrı kapatıldı")
+                setCall(null)
+            }
+            try { Thread.sleep(if (inCall) 500 else delay) } catch (_: InterruptedException) { break }
             delay = (delay * 2).coerceAtMost(10_000L)
+        }
+    }
+
+    /** Görüşme sürmüyorsa çağrıyı bırak; sürüyorsa yeniden bağlanınca tabletin durumu belirlesin. */
+    @Volatile private var lostAt = 0L
+
+    private fun onLinkLost() {
+        if (call?.state == Bridge.STATE_OFFHOOK) {
+            if (lostAt == 0L) lostAt = System.currentTimeMillis()
+            Log.w(Bridge.TAG, "Görüşme sürerken tablet bağlantısı koptu; yeniden bağlanılıyor")
+        } else {
+            setCall(null)
         }
     }
 
@@ -204,9 +222,13 @@ class BridgeClientService : Service() {
             pinFailed = false
             line = l
             hostAddress = host
+            lostAt = 0L // tablet bağlanınca ilk mesajında güncel çağrı durumunu yollar
             setStatus("Bağlı: ${host.hostAddress}")
             while (running) {
-                val m = l.read() ?: break
+                val m = l.read() ?: run {
+                    Log.w(Bridge.TAG, "Tablet bağlantıyı kapattı")
+                    null
+                } ?: break
                 when (m.optString("t")) {
                     "state" -> onState(m)
                     "result" -> {
@@ -361,6 +383,7 @@ class BridgeClientService : Service() {
         private const val EXTRA_CMD = "cmd"
         private const val PING_MS = 20_000L
         private const val READ_TIMEOUT_MS = 45_000
+        private const val LINK_GRACE_MS = 10_000L
 
         @Volatile var instance: BridgeClientService? = null
             private set

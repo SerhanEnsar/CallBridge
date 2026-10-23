@@ -221,6 +221,7 @@ class CallHostService : Service() {
     // ---- çağrı durumu ----
 
     private fun onCallState(newState: String, incoming: String?) {
+        if (newState != synchronized(this) { state }) Log.i(Bridge.TAG, "Çağrı durumu: $newState")
         var silenceNow = false
         synchronized(this) {
             if (test) { test = false; number = null; name = null }

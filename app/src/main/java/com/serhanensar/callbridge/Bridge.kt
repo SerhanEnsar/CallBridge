@@ -127,7 +127,8 @@ class Line(val socket: Socket) {
             writer.flush()
         }
         true
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        if (!socket.isClosed) android.util.Log.w(Bridge.TAG, "Gönderilemedi (${obj.optString("t")}), bağlantı kapatılıyor: $e")
         close()
         false
     }
