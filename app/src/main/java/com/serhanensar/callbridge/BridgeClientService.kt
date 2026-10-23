@@ -10,6 +10,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import org.json.JSONObject
 import java.net.Inet4Address
@@ -45,10 +46,13 @@ class BridgeClientService : Service() {
 
     @Volatile private var running = false
     @Volatile private var line: Line? = null
+    @Volatile private var hostAddress: InetAddress? = null
     @Volatile private var pinFailed = false
     @Volatile private var ringSilenced = false // bu çağrı için zil susturuldu
     private var pinger: ScheduledExecutorService? = null
     private lateinit var ringer: Ringer
+    private lateinit var callAudio: CallAudio
+    private var proximity: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,6 +60,12 @@ class BridgeClientService : Service() {
         super.onCreate()
         Bridge.ensureChannels(this)
         ringer = Ringer(this)
+        callAudio = CallAudio(this, network = { wifiNetwork() }, host = { hostAddress }, onRoute = ::updateProximity)
+        @Suppress("DEPRECATION")
+        proximity = getSystemService(PowerManager::class.java)
+            .takeIf { it.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK) }
+            ?.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "CallBridge:proximity")
+        audio = callAudio
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -164,6 +174,7 @@ class BridgeClientService : Service() {
             }
             pinFailed = false
             line = l
+            hostAddress = host
             setStatus("Bağlı: ${host.hostAddress}")
             while (running) {
                 val m = l.read() ?: break
@@ -201,6 +212,13 @@ class BridgeClientService : Service() {
         call = new
         if (new?.state != Bridge.STATE_RINGING || prev?.state != Bridge.STATE_RINGING) ringSilenced = false
         if (new?.state != Bridge.STATE_RINGING) ringer.stop()
+        if (new?.state == Bridge.STATE_OFFHOOK) callAudio.start() else {
+            callAudio.stop()
+            updateProximity("—")
+        }
+        if (prev?.state == Bridge.STATE_OFFHOOK && new?.state != Bridge.STATE_OFFHOOK && running) {
+            showForeground(CallNotifier.status(this, status, connected = line != null), microphone = false)
+        }
         when {
             new == null -> {
                 CallNotifier.cancelIncoming(this)
@@ -218,11 +236,38 @@ class BridgeClientService : Service() {
             }
             else -> {
                 CallNotifier.cancelIncoming(this)
-                getSystemService(NotificationManager::class.java)
-                    .notify(CallNotifier.STATUS_ID, CallNotifier.ongoing(this, new))
+                showForeground(CallNotifier.ongoing(this, new), microphone = true)
             }
         }
         if (new == null) lastResult = null
+    }
+
+    /** Ses ahizedeyken telefon kulağa yaklaşınca ekran kapansın (yanlışlıkla dokunmayı önler). */
+    @Synchronized
+    private fun updateProximity(route: String) {
+        val lock = proximity ?: return
+        val want = route == CallAudio.ROUTE_EARPIECE && call?.state == Bridge.STATE_OFFHOOK
+        if (want && !lock.isHeld) lock.acquire(4 * 60 * 60 * 1000L)
+        if (!want && lock.isHeld) lock.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY)
+    }
+
+    /**
+     * Görüşmede servis mikrofon türüne geçer (arka planda mikrofon için gerekli). Android bunu
+     * yalnızca kullanıcı etkileşiminden sonra izin verir; olmazsa bildirim yine güncellenir.
+     */
+    private fun showForeground(n: android.app.Notification, microphone: Boolean) {
+        if (Build.VERSION.SDK_INT < 30) {
+            getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, n)
+            return
+        }
+        val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            if (microphone) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        try {
+            startForeground(CallNotifier.STATUS_ID, n, type)
+        } catch (e: Exception) {
+            Log.w(Bridge.TAG, "Mikrofon türüne geçilemedi: $e")
+            getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, n)
+        }
     }
 
     private fun setStatus(text: String) {
@@ -268,6 +313,8 @@ class BridgeClientService : Service() {
         @Volatile var status = "Kapalı"
             private set
         @Volatile var lastResult: String? = null
+        @Volatile var audio: CallAudio? = null
+            private set
 
         val isRunning get() = instance != null
         val isConnected get() = instance?.line != null

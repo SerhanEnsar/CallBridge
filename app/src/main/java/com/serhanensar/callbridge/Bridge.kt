@@ -30,6 +30,8 @@ import javax.crypto.spec.SecretKeySpec
 object Bridge {
     const val TAG = "CallBridge"
     const val PORT = 47123
+    const val AUDIO_PORT = 47124 // tablet → telefon çağrı sesi (UDP)
+    const val MIC_PORT = 47125 // telefon → tablet mikrofon (UDP)
 
     const val ROLE_NONE = ""
     const val ROLE_HOST = "host"

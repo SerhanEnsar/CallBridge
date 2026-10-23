@@ -24,6 +24,7 @@ class IncomingCallActivity : Activity() {
     private lateinit var callRow: LinearLayout
     private lateinit var muteButton: TextView
     private lateinit var speakerButton: TextView
+    private lateinit var routeText: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -83,9 +84,19 @@ class IncomingCallActivity : Activity() {
         })
         ringingRow.setShown(ringing)
         callRow.setShown(!ringing)
-        toggleStyle(muteButton, call.muted)
-        toggleStyle(speakerButton, call.speaker)
-        val err = BridgeClientService.lastResult
+        val audio = BridgeClientService.audio
+        toggleStyle(muteButton, audio?.muted == true)
+        toggleStyle(speakerButton, audio?.speaker == true)
+        routeText.setTextIfChanged(
+            when (val r = audio?.route) {
+                null, "—" -> "Ses tablete aktarılıyor…"
+                CallAudio.ROUTE_EARPIECE -> "Ses: ahize"
+                CallAudio.ROUTE_SPEAKER -> "Ses: hoparlör"
+                else -> "Ses: $r"
+            }
+        )
+        routeText.setShown(!ringing)
+        val err = BridgeClientService.audio?.micError ?: BridgeClientService.lastResult
             ?: if (!BridgeClientService.isConnected) "Tablete bağlı değil" else null
         error.setTextIfChanged(err ?: "")
         error.setShown(err != null)
@@ -127,11 +138,14 @@ class IncomingCallActivity : Activity() {
         }
         root.addView(ringingRow, matchWidth(bottom = 20))
 
+        // Ses telefonda: mikrofon ve hoparlör bu cihazınki
         muteButton = circle("Mikrofonu\nkapat", c.neutral, c.text) {
-            send(if (BridgeClientService.call?.muted == true) "unmute" else "mute")
+            BridgeClientService.audio?.let { it.muted = !it.muted }
+            render()
         }
         speakerButton = circle("Hoparlör", c.neutral, c.text) {
-            send(if (BridgeClientService.call?.speaker == true) "speaker_off" else "speaker_on")
+            BridgeClientService.audio?.let { it.setSpeaker(!it.speaker) }
+            render()
         }
         callRow = row().apply {
             addView(muteButton)
@@ -142,7 +156,10 @@ class IncomingCallActivity : Activity() {
         root.addView(callRow, matchWidth(bottom = 20))
 
         root.addView(
-            label("Ses tablete bağlı Bluetooth kulaklıktan gelir.", 13f, c.secondary).apply { gravity = Gravity.CENTER },
+            label("", 13f, c.secondary).apply {
+                gravity = Gravity.CENTER
+                routeText = this
+            },
             matchWidth(),
         )
         return root

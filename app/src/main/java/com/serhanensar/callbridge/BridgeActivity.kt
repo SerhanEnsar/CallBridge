@@ -240,6 +240,7 @@ class BridgeActivity : Activity() {
 
     private fun clientPerms() = buildList {
         add(notificationPerm())
+        add(runtime("Mikrofon (telefondan konuşmak)", Manifest.permission.RECORD_AUDIO))
         if (Build.VERSION.SDK_INT >= 34) {
             add(
                 Perm(
