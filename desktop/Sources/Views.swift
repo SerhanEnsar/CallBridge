@@ -118,6 +118,7 @@ struct CallView: View {
     @StateObject private var keypad = Box(false)
     @StateObject private var dtmf = Box("")
     @StateObject private var tick = Box(Date())
+    @StateObject private var keys = KeyMonitor()
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -143,7 +144,26 @@ struct CallView: View {
             .padding(16)
             .frame(width: 320)
             .onReceive(timer) { tick.v = $0 }
+            // Görüşmede klavyeden basılan rakam tuş sesi olarak çağrıya gider (sesli yanıt menüleri)
+            .onAppear {
+                keys.start { key in
+                    guard bridge.audioHere, case .char(let c) = key, c != "+" else { return false }
+                    keypad.v = true
+                    sendTone(c)
+                    return true
+                }
+            }
+            .onDisappear {
+                keys.stop()
+                dtmf.v = ""
+                keypad.v = false
+            }
         }
+    }
+
+    private func sendTone(_ k: Character) {
+        dtmf.v.append(k)
+        bridge.audio.dtmf(k)
     }
 
     private func status(_ c: CallState) -> String {
@@ -171,7 +191,7 @@ struct CallView: View {
                     ForEach(["123", "456", "789", "*0#"], id: \.self) { row in
                         HStack(spacing: 10) {
                             ForEach(Array(row), id: \.self) { k in
-                                Button { dtmf.v.append(k); bridge.audio.dtmf(k) } label: {
+                                Button { sendTone(k) } label: {
                                     Text(String(k)).font(.system(size: 18, weight: .medium))
                                         .frame(width: 46, height: 46)
                                         .background(Circle().fill(Color.primary.opacity(0.1)))
@@ -433,38 +453,113 @@ struct ContactsList: View {
     }
 }
 
+/// Görünüm açıkken klavyeden tuş takımına yazmak: rakamlar, * # +, sil, Esc, Enter, ⌘V.
+/// Bir metin alanı (PIN, arama kutusu) düzenlenirken araya girmez.
+final class KeyMonitor: ObservableObject {
+    enum Key {
+        case char(Character)
+        case delete, clear, enter
+        case paste(String)
+    }
+
+    private var monitor: Any?
+
+    /// handler true dönerse tuş tüketilir.
+    func start(_ handler: @escaping (Key) -> Bool) {
+        stop()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            if e.window?.firstResponder is NSTextView { return e } // metin alanına yazılıyor
+            if e.modifierFlags.contains(.command) {
+                if e.charactersIgnoringModifiers == "v", let s = NSPasteboard.general.string(forType: .string) {
+                    return handler(.paste(s)) ? nil : e
+                }
+                return e
+            }
+            switch e.keyCode {
+            case 51, 117: return handler(.delete) ? nil : e // sil, ileri sil
+            case 53: return handler(.clear) ? nil : e // Esc
+            case 36, 76: return handler(.enter) ? nil : e // Enter, sayısal Enter
+            default: break
+            }
+            guard let ch = e.characters?.first, "0123456789*#+".contains(ch) else { return e }
+            return handler(.char(ch)) ? nil : e
+        }
+    }
+
+    func stop() {
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil
+    }
+
+    deinit { stop() }
+}
+
 struct KeypadView: View {
     @EnvironmentObject var bridge: BridgeClient
     @StateObject private var number = Box("")
+    @StateObject private var pressed = Box<String?>(nil)
+    @StateObject private var keys = KeyMonitor()
+
     var body: some View {
         VStack(spacing: 10) {
-            TextField("Numara", text: $number.v)
-                .font(.system(size: 22, weight: .semibold))
-                .multilineTextAlignment(.center)
-                .textFieldStyle(.plain)
-                .onSubmit { bridge.dial(number.v) }
+            Text(number.v.isEmpty ? "Numarayı yaz ya da tıkla" : number.v)
+                .font(.system(size: number.v.isEmpty ? 13 : 22, weight: number.v.isEmpty ? .regular : .semibold))
+                .foregroundStyle(number.v.isEmpty ? .secondary : .primary)
+                .lineLimit(1)
+                .frame(height: 30)
             ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]], id: \.self) { row in
                 HStack(spacing: 16) {
                     ForEach(row, id: \.self) { k in
-                        Button { number.v += k } label: {
+                        Button { press(k) } label: {
                             Text(k).font(.system(size: 20, weight: .medium))
                                 .frame(width: 52, height: 52)
-                                .background(Circle().fill(Color.primary.opacity(0.08)))
+                                .background(Circle().fill(Color.primary.opacity(pressed.v == k ? 0.25 : 0.08)))
                         }.buttonStyle(.plain)
                     }
                 }
             }
             HStack(spacing: 16) {
                 Color.clear.frame(width: 52, height: 52)
-                Button { bridge.dial(number.v); number.v = "" } label: {
+                Button(action: call) {
                     Image(systemName: "phone.fill").font(.system(size: 20)).foregroundStyle(.white)
                         .frame(width: 52, height: 52).background(Circle().fill(Theme.green))
                 }.buttonStyle(.plain)
-                Button { if !number.v.isEmpty { number.v.removeLast() } } label: {
+                Button { backspace() } label: {
                     Image(systemName: "delete.left").font(.system(size: 18)).foregroundStyle(.secondary).frame(width: 52, height: 52)
                 }.buttonStyle(.plain)
             }
+            Text("Klavye: rakamlar · Enter ara · Esc temizle · ⌘V yapıştır")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
         }
+        .onAppear {
+            keys.start { key in
+                switch key {
+                case .char(let c): press(String(c))
+                case .delete: backspace()
+                case .clear: number.v = ""
+                case .enter: call()
+                case .paste(let s): number.v += s.filter { $0.isNumber || "+*#".contains($0) }
+                }
+                return true
+            }
+        }
+        .onDisappear { keys.stop() }
+    }
+
+    private func press(_ k: String) {
+        number.v += k
+        pressed.v = k
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { if pressed.v == k { pressed.v = nil } }
+    }
+
+    private func backspace() {
+        if !number.v.isEmpty { number.v.removeLast() }
+    }
+
+    private func call() {
+        guard !number.v.isEmpty else { return }
+        bridge.dial(number.v)
+        number.v = ""
     }
 }
 
