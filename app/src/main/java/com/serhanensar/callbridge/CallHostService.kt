@@ -23,6 +23,7 @@ import android.util.Log
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
@@ -121,6 +122,12 @@ class CallHostService : Service() {
             registerReceiver(phoneReceiver, IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED))
         }
         thread(name = "bridge-accept", isDaemon = true) { acceptLoop(ss) }
+        thread(name = "relay-check", isDaemon = true) {
+            while (running) {
+                relayReady = relayRequest(Bridge.msg("status")) != null
+                Thread.sleep(10_000)
+            }
+        }
     }
 
     private fun stopHost() {
@@ -178,7 +185,7 @@ class CallHostService : Service() {
                     "ping" -> line.send(Bridge.msg("pong"))
                     "cmd" -> {
                         val cmd = m.optString("cmd")
-                        val error = execute(cmd)
+                        val error = execute(cmd, peer)
                         Log.i(Bridge.TAG, "Komut $cmd: ${error ?: "tamam"}")
                         line.send(Bridge.msg("result", "cmd" to cmd, "ok" to (error == null), "error" to error))
                     }
@@ -233,8 +240,49 @@ class CallHostService : Service() {
         if (newState == Bridge.STATE_IDLE) {
             restoreRinger()
             try { audio.isMicrophoneMute = false } catch (_: Exception) {}
+            if (audioPeer != null) {
+                audioPeer = null
+                thread(isDaemon = true) { relayRequest(Bridge.msg("stop")) }
+            }
         }
         broadcast()
+        // Telefondan yanıtlandıysa ses görüşme başlayınca telefona aktarılır
+        if (newState == Bridge.STATE_OFFHOOK) audioPeer?.let { p -> thread(isDaemon = true) { startRelay(p) } }
+    }
+
+    // ---- ses aktarımı (shell yetkili RelayDaemon üzerinden) ----
+
+    /** Sesin aktarıldığı telefon; null ise ses tablette kalır. */
+    @Volatile private var audioPeer: Peer? = null
+
+    private fun relayRequest(msg: JSONObject): JSONObject? = try {
+        Socket().use { s ->
+            s.connect(InetSocketAddress("127.0.0.1", Bridge.RELAY_PORT), 1000)
+            s.soTimeout = 5000
+            val l = Line(s)
+            l.send(msg)
+            l.read()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun startRelay(p: Peer) {
+        val reply = relayRequest(Bridge.msg("start", "ip" to p.line.socket.inetAddress.hostAddress))
+        val error = when {
+            reply == null -> "Tablette ses aktarıcısı çalışmıyor; ses tablette kaldı"
+            reply.optBoolean("active") -> null
+            else -> reply.optString("error", "Ses aktarılamadı")
+        }
+        relayReady = reply != null
+        Log.i(Bridge.TAG, "Ses aktarımı → ${p.name}: ${error ?: "başladı"}")
+        p.line.send(Bridge.msg("audio", "active" to (error == null), "error" to error))
+    }
+
+    private fun stopRelay(p: Peer) {
+        audioPeer = null
+        relayRequest(Bridge.msg("stop"))
+        p.line.send(Bridge.msg("audio", "active" to false))
     }
 
     private fun contactName(number: String): String? {
@@ -252,14 +300,24 @@ class CallHostService : Service() {
     // ---- komutlar ----
 
     /** Komutu uygular; hata varsa açıklamasını döndürür. */
-    private fun execute(cmd: String): String? {
+    private fun execute(cmd: String, peer: Peer): String? {
         if (cmd == "test") return startTest()
         if (synchronized(this) { test }) return executeTest(cmd)
         return try {
             when (cmd) {
                 "accept" -> {
                     if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) return "Tablette çağrı yanıtlama izni yok"
+                    audioPeer = peer // görüşme başlayınca ses bu telefona gelir
                     telecom.acceptRingingCall()
+                    null
+                }
+                "audio_on" -> {
+                    audioPeer = peer
+                    if (synchronized(this) { state } == Bridge.STATE_OFFHOOK) startRelay(peer)
+                    null
+                }
+                "audio_off" -> {
+                    stopRelay(peer)
                     null
                 }
                 "end" -> {
@@ -405,6 +463,10 @@ class CallHostService : Service() {
 
         val isRunning get() = instance != null
         val peerCount get() = instance?.peers?.size ?: 0
+
+        /** Ses aktarıcısı (RelayDaemon) son denetimde yanıt verdi mi; null: henüz bilinmiyor. */
+        @Volatile var relayReady: Boolean? = null
+            private set
 
         fun start(ctx: Context) {
             ctx.startForegroundService(Intent(ctx, CallHostService::class.java))

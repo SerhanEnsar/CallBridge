@@ -29,7 +29,21 @@ flowchart LR
 
 ## Ses
 
-Android, root olmadan çağrının sesini başka bir uygulamaya vermiyor. Telefon çağrıyı gösterir ve yönetir; konuşma tabletin kendisinden ya da ona bağlı bir Bluetooth kulaklıktan yapılır.
+Telefondan yanıtlanan çağrıda konuşma telefondan yapılır: karşı tarafın sesi telefonun ahizesine (bağlıysa Bluetooth kulaklığa, istenirse hoparlöre) gelir, telefonun mikrofonu çağrıya gider. Aktarım sürerken tabletin mikrofonu kapanır ve çağrı sesi en kısığa iner.
+
+Android normal uygulamalara çağrının sesini vermiyor. Bunu tablette shell yetkisiyle çalışan **ses aktarıcısı** (`RelayDaemon`) yapar:
+
+- Karşı tarafın sesini `VOICE_DOWNLINK` kaynağından alıp UDP `47124` ile telefona gönderir.
+- Telefonun mikrofonunu UDP `47125`'ten alıp tabletin "Telephony Tx" ucuna verir.
+- Yalnızca tabletin içinden (`127.0.0.1:47126`) ve yalnızca CallBridge'in bağlantısını kabul eder; bağlananın kimliği sistemin bağlantı tablosundan doğrulanır.
+
+Aktarıcı tablet yeniden başlayana kadar çalışır. Her açılıştan sonra tablet USB ile Mac'e bağlıyken bir kez başlatılır:
+
+```bash
+./setup.sh relay
+```
+
+Aktarıcı kapalıysa çağrı yine telefondan yönetilir, ama ses tablette kalır.
 
 ## Hotspot TTL ile birlikte
 
@@ -67,6 +81,9 @@ app/src/main/java/com/serhanensar/callbridge/
 ├── CallHostService.kt      # tablet: çağrıyı izler, komutları uygular
 ├── BridgeClientService.kt  # telefon: bağlantı, yeniden bağlanma
 ├── CallNotifier.kt         # çağrı bildirimleri
+├── CallAudio.kt            # telefon: çağrı sesini çalar, mikrofonu gönderir
+├── RelayDaemon.kt          # tablet: shell yetkili ses aktarıcısı
+├── Ringer.kt               # telefonun zili
 ├── IncomingCallActivity.kt # tam ekran çağrı ekranı
 ├── BridgeActivity.kt       # kurulum ekranı
 ├── BootReceiver.kt         # açılışta yeniden başlatma

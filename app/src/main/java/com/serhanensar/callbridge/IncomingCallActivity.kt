@@ -87,12 +87,14 @@ class IncomingCallActivity : Activity() {
         val audio = BridgeClientService.audio
         toggleStyle(muteButton, audio?.muted == true)
         toggleStyle(speakerButton, audio?.speaker == true)
+        val route = audio?.route
         routeText.setTextIfChanged(
-            when (val r = audio?.route) {
-                null, "—" -> "Ses tablete aktarılıyor…"
-                CallAudio.ROUTE_EARPIECE -> "Ses: ahize"
-                CallAudio.ROUTE_SPEAKER -> "Ses: hoparlör"
-                else -> "Ses: $r"
+            when {
+                BridgeClientService.audioError != null -> BridgeClientService.audioError!!
+                !BridgeClientService.audioActive || route == null || route == "—" -> "Ses telefona aktarılıyor…"
+                route == CallAudio.ROUTE_EARPIECE -> "Ses: ahize"
+                route == CallAudio.ROUTE_SPEAKER -> "Ses: hoparlör"
+                else -> "Ses: $route"
             }
         )
         routeText.setShown(!ringing)

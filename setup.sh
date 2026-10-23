@@ -1,9 +1,13 @@
 #!/bin/bash
 # CallBridge'i USB'ye bağlı iki cihaza kurar ve bağlantıyı doğrular.
 #
-#   ./bridge-setup.sh                      # SIM'i hazır olan cihaz tablet sayılır
-#   ./bridge-setup.sh <tablet> <telefon>   # adb seri numaralarıyla
-#   ./bridge-setup.sh --test               # kurulumdan sonra test çağrısı da dener
+#   ./setup.sh                      # SIM'i hazır olan cihaz tablet sayılır
+#   ./setup.sh <tablet> <telefon>   # adb seri numaralarıyla
+#   ./setup.sh --test               # kurulumdan sonra test çağrısı da dener
+#   ./setup.sh relay [tablet]       # yalnızca tablette ses aktarıcısını başlatır
+#
+# Ses aktarıcısı shell yetkisiyle çalışır ve tablet yeniden başlayana kadar açık kalır;
+# her açılıştan sonra tablet USB'ye takılıyken bir kez ./setup.sh relay çalıştırılır.
 #
 # Gerekenler: iki cihazda USB hata ayıklama açık, ekran kilidi açık,
 # telefon tabletin hotspot'una bağlı.
@@ -14,16 +18,53 @@ ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
 PKG=com.serhanensar.callbridge
 APK=app/build/outputs/apk/debug/app-debug.apk
 OUT="${TMPDIR:-/tmp}"
+RELAY_LOG=/data/local/tmp/callbridge-relay.log
 
 RUN_TEST=0
+RELAY_ONLY=0
 ARGS=()
 for a in "$@"; do
-    if [ "$a" = "--test" ]; then RUN_TEST=1; else ARGS+=("$a"); fi
+    case "$a" in
+        --test) RUN_TEST=1 ;;
+        relay) RELAY_ONLY=1 ;;
+        *) ARGS+=("$a") ;;
+    esac
 done
 
 say() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
 fail() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
+
+# Tablette CallBridge APK'sının içindeki RelayDaemon'u shell yetkisiyle arka planda başlatır.
+start_relay() {
+    local dev="$1" apk uid
+    apk=$("$ADB" -s "$dev" shell pm path "$PKG" | sed -n 's/^package://p' | head -1 | tr -d '\r')
+    uid=$("$ADB" -s "$dev" shell pm list packages -U "$PKG" | sed -n "s/^package:$PKG uid:\([0-9]*\).*/\1/p" | tr -d '\r')
+    [ -n "$apk" ] && [ -n "$uid" ] || fail "Tablette CallBridge kurulu değil"
+    # Süreç adı (argv0) "callbridge-relay"; ^ ile yalnızca o eşleşir, bu komutun kendisi değil
+    "$ADB" -s "$dev" shell "pkill -f '^callbridge-relay'; sleep 0.5; CLASSPATH=$apk setsid nohup app_process / $PKG.RelayDaemon $uid > $RELAY_LOG 2>&1 < /dev/null &"
+    sleep 2
+    if "$ADB" -s "$dev" shell pgrep -f "'^callbridge-relay'" >/dev/null; then
+        ok "Ses aktarıcısı çalışıyor ($("$ADB" -s "$dev" shell head -1 "$RELAY_LOG" | tr -d '\r'))"
+    else
+        "$ADB" -s "$dev" shell cat "$RELAY_LOG"
+        fail "Ses aktarıcısı başlamadı"
+    fi
+}
+
+if [ "$RELAY_ONLY" = 1 ]; then
+    HOST="${ARGS[0]:-}"
+    if [ -z "$HOST" ]; then
+        for d in $("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}'); do
+            sim=$("$ADB" -s "$d" shell getprop gsm.sim.state | tr -d '\r')
+            if [[ "$sim" == *READY* || "$sim" == *LOADED* ]]; then HOST="$d"; break; fi
+        done
+    fi
+    [ -n "$HOST" ] || fail "Tablet bulunamadı; seri numarasını ver: $0 relay <tablet>"
+    say "Tablette ses aktarıcısı başlatılıyor"
+    start_relay "$HOST"
+    exit 0
+fi
 
 # ---- cihazlar ----
 
@@ -141,6 +182,8 @@ else
     "$ADB" -s "$HOST" exec-out screencap -p > "$OUT/cb-tablet.png"
     fail "Tablet servisi başlamadı; ekran görüntüsü: $OUT/cb-tablet.png"
 fi
+
+start_relay "$HOST"
 
 # ---- telefon ----
 

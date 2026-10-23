@@ -38,6 +38,7 @@ class BridgeActivity : Activity() {
     private lateinit var hostToggle: TextView
     private lateinit var hostStatus: TextView
     private lateinit var hostTestButton: TextView
+    private lateinit var relayStatus: TextView
 
     private lateinit var pinInput: EditText
     private lateinit var hostInput: EditText
@@ -181,6 +182,14 @@ class BridgeActivity : Activity() {
                 else -> "Kapalı"
             })
             hostTestButton.alpha = if (CallHostService.peerCount > 0) 1f else 0.4f
+            relayStatus.setTextIfChanged(
+                when (CallHostService.relayReady) {
+                    true -> "Ses aktarıcısı hazır: konuşma telefondan yapılır"
+                    false -> "Ses aktarıcısı kapalı: tableti USB ile bağlayıp ./setup.sh relay çalıştır"
+                    null -> ""
+                }
+            )
+            relayStatus.setTextColor(if (CallHostService.relayReady == false) c.red else c.secondary)
         }
         if (role == Bridge.ROLE_CLIENT) {
             val on = BridgeClientService.isRunning
@@ -307,7 +316,9 @@ class BridgeActivity : Activity() {
         hostToggle = bigButton { toggleHost() }
         addView(hostToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)).apply { bottomMargin = dp(8) })
         hostStatus = label("", 14f, c.secondary).apply { gravity = Gravity.CENTER }
-        addView(hostStatus, matchWidth(bottom = 14))
+        addView(hostStatus, matchWidth(bottom = 4))
+        relayStatus = label("", 13f, c.secondary).apply { gravity = Gravity.CENTER }
+        addView(relayStatus, matchWidth(bottom = 14))
 
         hostTestButton = label("Telefona test çağrısı gönder", 17f, c.text).apply {
             gravity = Gravity.CENTER
@@ -333,9 +344,9 @@ class BridgeActivity : Activity() {
                 "1. Hotspot'u aç ve telefonu bu tablete bağla.\n" +
                     "2. Başlat'a bas, izinleri ver.\n" +
                     "3. Telefonda CallBridge'i aç, Telefon'u seç ve bu PIN'i gir.\n" +
-                    "4. Konuşmak için tablete bir Bluetooth kulaklık bağla.\n\n" +
-                    "Android, root olmadan çağrının sesini başka bir uygulamaya vermiyor. " +
-                    "Telefon çağrıyı gösterir ve yönetir; ses tabletten ya da ona bağlı kulaklıktan gelir.",
+                    "4. Tablet her açıldığında USB ile Mac'e bağlayıp ./setup.sh relay çalıştır.\n\n" +
+                    "Ses aktarıcısı açıkken telefondan yanıtlanan çağrının sesi telefona gelir, " +
+                    "telefonun mikrofonu çağrıya gider. Aktarıcı kapalıysa ses tablette kalır.",
                 13f, c.secondary,
             ),
             matchWidth(),

@@ -181,6 +181,10 @@ class BridgeClientService : Service() {
                 when (m.optString("t")) {
                     "state" -> onState(m)
                     "result" -> lastResult = if (m.optBoolean("ok")) null else m.optString("error", "Komut başarısız")
+                    "audio" -> {
+                        audioActive = m.optBoolean("active")
+                        audioError = m.optString("error").ifEmpty { null }
+                    }
                 }
             }
         }
@@ -239,7 +243,11 @@ class BridgeClientService : Service() {
                 showForeground(CallNotifier.ongoing(this, new), microphone = true)
             }
         }
-        if (new == null) lastResult = null
+        if (new == null) {
+            lastResult = null
+            audioActive = false
+            audioError = null
+        }
     }
 
     /** Ses ahizedeyken telefon kulağa yaklaşınca ekran kapansın (yanlışlıkla dokunmayı önler). */
@@ -314,6 +322,12 @@ class BridgeClientService : Service() {
             private set
         @Volatile var lastResult: String? = null
         @Volatile var audio: CallAudio? = null
+            private set
+
+        /** Tablet çağrının sesini bu telefona aktarıyor mu; aktaramıyorsa nedeni. */
+        @Volatile var audioActive = false
+            private set
+        @Volatile var audioError: String? = null
             private set
 
         val isRunning get() = instance != null
