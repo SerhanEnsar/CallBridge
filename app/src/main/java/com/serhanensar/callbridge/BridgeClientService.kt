@@ -184,9 +184,11 @@ class BridgeClientService : Service() {
     /** Gelen çağrıyı CallBridge arama hesabı üzerinden sisteme bildirir: Samsung'un ekranında çalar. */
     private fun offerToSystem(c: Call) {
         if (!PhoneAccounts.isEnabled(this)) {
+            Bridge.log("Arama hesabı kapalı; gelen çağrı CallBridge ekranında")
             ringHere(c, fresh = true)
             return
         }
+        Bridge.log("Gelen çağrı sisteme veriliyor")
         incomingPending = true
         try {
             getSystemService(TelecomManager::class.java).addNewIncomingCall(

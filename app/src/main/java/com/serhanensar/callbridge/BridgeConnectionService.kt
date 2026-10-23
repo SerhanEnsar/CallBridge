@@ -133,10 +133,15 @@ object PhoneAccounts {
         ctx.getSystemService(TelecomManager::class.java).unregisterPhoneAccount(handle(ctx))
     }
 
-    /** Kullanıcı hesabı arama ayarlarından açtı mı. */
+    /**
+     * Kullanıcı hesabı arama ayarlarından açtı mı. Samsung getPhoneAccount için READ_PHONE_NUMBERS
+     * istiyor; arama yapabilen hesaplar listesi READ_PHONE_STATE ile okunabiliyor ve yalnızca açık
+     * hesapları içeriyor.
+     */
+    @android.annotation.SuppressLint("MissingPermission") // READ_PHONE_STATE yoksa SecurityException yakalanır
     fun isEnabled(ctx: Context): Boolean = try {
-        ctx.getSystemService(TelecomManager::class.java).getPhoneAccount(handle(ctx))?.isEnabled == true
-    } catch (_: Exception) {
+        ctx.getSystemService(TelecomManager::class.java).callCapablePhoneAccounts.contains(handle(ctx))
+    } catch (_: SecurityException) {
         false
     }
 
