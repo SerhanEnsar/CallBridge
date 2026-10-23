@@ -156,7 +156,11 @@ class CallHostService : Service() {
         thread(name = "bridge-accept", isDaemon = true) { acceptLoop(ss) }
         thread(name = "relay-check", isDaemon = true) {
             while (running) {
-                relayReady = relayRequest(Bridge.msg("status")) != null
+                val ready = relayRequest(Bridge.msg("status")) != null
+                if (ready != relayReady) {
+                    relayReady = ready
+                    broadcast() // cihazlar aktarıcının durumunu ana ekranda gösterir
+                }
                 Thread.sleep(10_000)
             }
         }
@@ -253,6 +257,7 @@ class CallHostService : Service() {
             "outgoing" to outgoing,
             "answered_by" to answeredBy,
             "audio_to" to audioTo,
+            "relay" to relayReady, // ses aktarıcısı çalışıyor mu (cihazların ana ekranı için)
         )
     }
 

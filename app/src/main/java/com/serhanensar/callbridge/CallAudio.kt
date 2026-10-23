@@ -76,6 +76,7 @@ class CallAudio(
         micPackets = 0
         micError = null
         muted = false
+        preferred = null // her görüşme kendiliğinden yolla başlar (Bluetooth varsa o)
         thread(name = "call-audio", isDaemon = true) { receiveLoop() }
         thread(name = "call-mic", isDaemon = true) { micLoop() }
     }
@@ -88,9 +89,71 @@ class CallAudio(
         socket = null
     }
 
-    fun setSpeaker(on: Boolean) {
-        speaker = on
+    /** Kullanıcının seçtiği ses yolu (ROUTE_* ya da Bluetooth cihazının adı); null: kendiliğinden. */
+    @Volatile private var preferred: String? = null
+
+    fun setSpeaker(on: Boolean) = selectRoute(if (on) ROUTE_SPEAKER else null)
+
+    fun selectRoute(label: String?) {
+        preferred = label
         if (running && !systemRouted) applyRoute()
+    }
+
+    /** Seçilebilecek ses yolları: ahize, hoparlör ve bağlı Bluetooth kulaklıklar. */
+    fun routes(): List<String> {
+        if (Build.VERSION.SDK_INT < 31) return listOf(ROUTE_EARPIECE, ROUTE_SPEAKER)
+        val devices = audio.availableCommunicationDevices
+        return buildList {
+            if (devices.any { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }) add(ROUTE_EARPIECE)
+            add(ROUTE_SPEAKER)
+            devices.filter { it.isBluetooth() }.forEach { add(it.productName?.toString() ?: "Bluetooth") }
+        }.distinct()
+    }
+
+    val isBluetooth get() = route != ROUTE_EARPIECE && route != ROUTE_SPEAKER && route != ROUTE_SYSTEM && route != "—"
+
+    // ---- tuşlama (DTMF) ----
+    // Uygulamalar çağrıya tuş sinyali gönderemiyor; tuşun iki frekanslı sesi mikrofon akışına karıştırılır.
+
+    private var tone: ShortArray? = null
+    private var tonePos = 0
+    private val toneLock = Any()
+    private val toneGen by lazy {
+        try { android.media.ToneGenerator(AudioManager.STREAM_VOICE_CALL, 50) } catch (_: Exception) { null }
+    }
+
+    fun dtmf(key: Char) {
+        val (low, high) = DTMF[key] ?: return
+        val n = RATE * 160 / 1000
+        val samples = ShortArray(n + RATE * 60 / 1000) // 160 ms ses + 60 ms boşluk
+        for (i in 0 until n) {
+            val t = i.toDouble() / RATE
+            samples[i] = ((Math.sin(2 * Math.PI * low * t) + Math.sin(2 * Math.PI * high * t)) * 6000).toInt().toShort()
+        }
+        synchronized(toneLock) {
+            // Basılı süren bir tonun arkasına ekle (hızlı tuşlamada sesler karışmasın)
+            val rest = tone?.let { it.copyOfRange(tonePos, it.size) } ?: ShortArray(0)
+            tone = rest + samples
+            tonePos = 0
+        }
+        toneGen?.startTone(DTMF_TONES[key] ?: return, 150) // kullanıcı da duysun
+    }
+
+    /** Sıradaki tuş sesini mikrofon örneklerine karıştırır (little-endian 16 bit). */
+    private fun mixTone(buf: ByteArray, offset: Int, bytes: Int) {
+        synchronized(toneLock) {
+            val t = tone ?: return
+            var i = 0
+            while (i + 1 < bytes && tonePos < t.size) {
+                val s = (buf[offset + i].toInt() and 0xff) or (buf[offset + i + 1].toInt() shl 8)
+                val mixed = (s + t[tonePos]).coerceIn(-32768, 32767)
+                buf[offset + i] = mixed.toByte()
+                buf[offset + i + 1] = (mixed shr 8).toByte()
+                tonePos++
+                i += 2
+            }
+            if (tonePos >= t.size) tone = null
+        }
     }
 
     private fun receiveLoop() {
@@ -217,6 +280,7 @@ class CallAudio(
                 val n = rec.read(buf, HEADER, FRAME_BYTES)
                 if (n <= 0) continue
                 if (muted) java.util.Arrays.fill(buf, HEADER, HEADER + n, 0)
+                mixTone(buf, HEADER, n) // sessizdeyken de tuş sesi gitsin (sesli yanıt sistemleri için)
                 buf[0] = (seq shr 24).toByte(); buf[1] = (seq shr 16).toByte(); buf[2] = (seq shr 8).toByte(); buf[3] = seq.toByte()
                 s.send(DatagramPacket(buf, HEADER + n, dest, Bridge.MIC_PORT))
                 seq++
@@ -232,23 +296,28 @@ class CallAudio(
         }
     }
 
-    /** Bluetooth kulaklık > (hoparlör seçiliyse hoparlör) > ahize. */
+    private fun AudioDeviceInfo.isBluetooth() =
+        type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+
+    /** Seçilen yol; seçilmemişse Bluetooth kulaklık > ahize. */
     private fun applyRoute() {
+        val pref = preferred
         if (Build.VERSION.SDK_INT < 31) {
+            val sp = pref == ROUTE_SPEAKER
             @Suppress("DEPRECATION")
-            audio.isSpeakerphoneOn = speaker
-            route = if (speaker) ROUTE_SPEAKER else ROUTE_EARPIECE
+            audio.isSpeakerphoneOn = sp
+            route = if (sp) ROUTE_SPEAKER else ROUTE_EARPIECE
+            speaker = sp
             onRoute(route)
             return
         }
         val devices = audio.availableCommunicationDevices
-        val bt = devices.firstOrNull {
-            it.type == AudioDeviceInfo.TYPE_BLE_HEADSET || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-        }
-        val pick = when {
-            speaker -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-            bt != null -> bt
-            else -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+        val earpiece = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+        val pick = when (pref) {
+            ROUTE_SPEAKER -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            ROUTE_EARPIECE -> earpiece
+            null -> devices.firstOrNull { it.isBluetooth() } ?: earpiece
+            else -> devices.firstOrNull { it.isBluetooth() && it.productName?.toString() == pref } ?: earpiece
         }
         if (pick != null && audio.setCommunicationDevice(pick)) {
             route = when (pick.type) {
@@ -256,6 +325,7 @@ class CallAudio(
                 AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> ROUTE_EARPIECE
                 else -> pick.productName?.toString() ?: "Bluetooth"
             }
+            speaker = route == ROUTE_SPEAKER
             onRoute(route)
         }
     }
@@ -268,5 +338,21 @@ class CallAudio(
         const val ROUTE_SPEAKER = "hoparlör"
         const val ROUTE_EARPIECE = "ahize"
         const val ROUTE_SYSTEM = "sistem"
+
+        /** Tuş → (alçak, yüksek) frekans, Hz. */
+        private val DTMF = mapOf(
+            '1' to (697 to 1209), '2' to (697 to 1336), '3' to (697 to 1477),
+            '4' to (770 to 1209), '5' to (770 to 1336), '6' to (770 to 1477),
+            '7' to (852 to 1209), '8' to (852 to 1336), '9' to (852 to 1477),
+            '*' to (941 to 1209), '0' to (941 to 1336), '#' to (941 to 1477),
+        )
+        private val DTMF_TONES = mapOf(
+            '0' to android.media.ToneGenerator.TONE_DTMF_0, '1' to android.media.ToneGenerator.TONE_DTMF_1,
+            '2' to android.media.ToneGenerator.TONE_DTMF_2, '3' to android.media.ToneGenerator.TONE_DTMF_3,
+            '4' to android.media.ToneGenerator.TONE_DTMF_4, '5' to android.media.ToneGenerator.TONE_DTMF_5,
+            '6' to android.media.ToneGenerator.TONE_DTMF_6, '7' to android.media.ToneGenerator.TONE_DTMF_7,
+            '8' to android.media.ToneGenerator.TONE_DTMF_8, '9' to android.media.ToneGenerator.TONE_DTMF_9,
+            '*' to android.media.ToneGenerator.TONE_DTMF_S, '#' to android.media.ToneGenerator.TONE_DTMF_P,
+        )
     }
 }

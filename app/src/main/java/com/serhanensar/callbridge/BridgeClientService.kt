@@ -357,6 +357,7 @@ class BridgeClientService : Service() {
     }
 
     private fun onState(m: JSONObject) {
+        if (m.has("relay")) relayReady = m.optBoolean("relay")
         val state = m.optString("state", Bridge.STATE_IDLE)
         if (state == Bridge.STATE_IDLE) {
             setCall(null)
@@ -551,6 +552,10 @@ class BridgeClientService : Service() {
         @Volatile var audioActive = false
             private set
         @Volatile var audioError: String? = null
+            private set
+
+        /** Tabletteki ses aktarıcısı çalışıyor mu; null: tablet henüz bildirmedi. */
+        @Volatile var relayReady: Boolean? = null
             private set
 
         /** Tabletin son aramaları; her güncellemede historyVersion artar. */

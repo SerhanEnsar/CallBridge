@@ -212,6 +212,10 @@ write_prefs "$CLIENT" client "$PIN"
 "$ADB" -s "$CLIENT" logcat -c
 start_bridge "$CLIENT"
 service_running "$CLIENT" BridgeClientService && ok "Telefon servisi açık" || fail "Telefon servisi başlamadı"
+# Arama hesabını aç ve varsayılan giden arama hesabı yap (servis başlarken kaydedilir)
+ACCOUNT="$PKG/.BridgeConnectionService callbridge 0"
+"$ADB" -s "$CLIENT" shell "telecom set-phone-account-enabled $ACCOUNT; telecom set-user-selected-outgoing-phone-account $ACCOUNT" >/dev/null \
+    && ok "Arama hesabı açık (çağrılar Samsung ekranında)" || echo "  Arama hesabı açılamadı; telefonda Ayarlar → Arama hesapları"
 
 say "Bağlantı bekleniyor"
 for i in $(seq 1 15); do
@@ -239,26 +243,22 @@ if [ "$RUN_TEST" = 1 ]; then
     "$ADB" -s "$HOST" shell input keyevent KEYCODE_WAKEUP
     "$ADB" -s "$HOST" shell am start -W -n "$PKG/.BridgeActivity" >/dev/null
     sleep 1
-    tap_text "$HOST" "Telefona test çağrısı" || fail "Tablette test düğmesi bulunamadı"
+    tap_text "$HOST" "Cihazlara test çağrısı" || fail "Tablette test düğmesi bulunamadı"
     sleep 3
-    if "$ADB" -s "$CLIENT" shell dumpsys activity activities | grep -E "topResumedActivity|ResumedActivity:" | grep -q IncomingCallActivity; then
-        ok "Kilit ekranında çağrı ekranı açıldı"
+    # Gelen çağrı arama hesabı üzerinden sistemin (Samsung'un) ekranında çalmalı
+    if "$ADB" -s "$CLIENT" shell dumpsys telecom | grep -E "^ *Call TC@|state=RINGING" | grep -q RINGING; then
+        ok "Telefonda sistemin gelen arama ekranı çalıyor"
+    elif "$ADB" -s "$CLIENT" shell dumpsys activity activities | grep -E "topResumedActivity|ResumedActivity:" | grep -q IncomingCallActivity; then
+        ok "Telefonda CallBridge çağrı ekranı açıldı (arama hesabı kapalı)"
     else
-        echo "  Çağrı ekranı öne gelmedi"
+        echo "  Telefonda çağrı görünmedi"
     fi
     "$ADB" -s "$CLIENT" exec-out screencap -p > "$OUT/cb-ringing.png"
-    if "$ADB" -s "$CLIENT" shell dumpsys audio | grep -A1 "USAGE_NOTIFICATION_RINGTONE" | grep -q "state:started"; then
-        ok "Telefon çalıyor"
-    fi
-    tap_text "$CLIENT" "Yanıtla" && sleep 1.5
-    screen_has "$CLIENT" "Görüşmede" && ok "Yanıtla komutu tabletten döndü" || echo "  'Görüşmede' görünmedi"
-    if "$ADB" -s "$CLIENT" shell dumpsys audio | grep -A1 "USAGE_NOTIFICATION_RINGTONE" | grep -q "state:started"; then
-        echo "  Zil yanıttan sonra hâlâ çalıyor"
-    else
-        ok "Zil durdu"
-    fi
+    "$ADB" -s "$CLIENT" shell input keyevent KEYCODE_CALL # çalan çağrıyı yanıtlar
+    sleep 2
     "$ADB" -s "$CLIENT" exec-out screencap -p > "$OUT/cb-incall.png"
-    tap_text "$CLIENT" "Kapat" && sleep 1.5
+    "$ADB" -s "$CLIENT" shell input keyevent KEYCODE_ENDCALL
+    sleep 2
     "$ADB" -s "$HOST" logcat -d -s CallBridge | grep -E "Komut (accept|end)" | tail -2 | sed 's/^/  tablet: /'
     echo "  Ekran görüntüleri: $OUT/cb-ringing.png, $OUT/cb-incall.png"
 fi
