@@ -14,7 +14,6 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.InputType
-import android.text.format.DateUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.EditText
@@ -454,7 +453,7 @@ class BridgeActivity : Activity() {
         }
         val sub = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         sub.addView(icon(iconRes, color, 13), LinearLayout.LayoutParams(dp(13), dp(13)).apply { marginEnd = dp(5) })
-        sub.addView(label(DateUtils.getRelativeTimeSpanString(h.date, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString(), 12f, c.secondary))
+        sub.addView(label(whenLabel(h.date), 12f, c.secondary))
         texts.addView(sub)
         addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         addView(icon(R.drawable.ic_call, c.green, 20), LinearLayout.LayoutParams(dp(20), dp(20)))

@@ -145,7 +145,7 @@ class IncomingCallActivity : Activity() {
                 else -> route.take(12)
             })
         }
-        renderQuality(here, audio)
+        renderQuality(here && !call.test, audio) // test çağrısında ses akmaz
 
         val routeMsg = when {
             BridgeClientService.audioError != null -> BridgeClientService.audioError!!

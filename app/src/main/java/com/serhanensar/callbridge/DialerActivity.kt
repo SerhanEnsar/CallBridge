@@ -12,14 +12,12 @@ import android.provider.ContactsContract
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.text.format.DateUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.util.Calendar
 import kotlin.concurrent.thread
 
 /**
@@ -156,7 +154,7 @@ class DialerActivity : Activity() {
                         val name = cur.getString(0) ?: continue
                         val num = cur.getString(1) ?: continue
                         if (!seen.add(name + "|" + num.filter { it.isDigit() }.takeLast(10))) continue // aynı numara iki kez
-                        val label = ContactsContract.CommonDataKinds.Phone.getTypeLabel(resources, cur.getInt(2), cur.getString(3)).toString()
+                        val label = phoneTypeLabel(cur.getInt(2), cur.getString(3))
                         out += Contact(name, num, label, cur.getInt(4) == 1)
                     }
                 }
@@ -224,7 +222,7 @@ class DialerActivity : Activity() {
                 else -> R.drawable.ic_call_in to c.green
             }
             val sub = buildString {
-                append(DateUtils.formatDateTime(this@DialerActivity, h.date, DateUtils.FORMAT_SHOW_TIME))
+                append(timeOf(h.date))
                 if (h.duration > 0) append(" · ").append(duration(h.duration))
                 if (name != null) append(" · ").append(h.number)
             }
@@ -264,7 +262,7 @@ class DialerActivity : Activity() {
         var letter = ""
         var lastName: String? = null
         matches.take(400).forEach { ct ->
-            val l = ct.name.take(1).uppercase()
+            val l = firstLetter(ct.name)
             if (l != letter) {
                 contactsList.addView(sectionTitle(l, c).apply { setPadding(dp(4), dp(14), 0, dp(6)) }, matchWidth())
                 letter = l
@@ -295,16 +293,6 @@ class DialerActivity : Activity() {
             .forEach { ct ->
                 suggestions.addView(personRow(ct.name, ct.name, ct.number, 0, 0) { call(ct.number, ct.name) }, matchWidth())
             }
-    }
-
-    private fun dayLabel(date: Long): String = when {
-        DateUtils.isToday(date) -> "Bugün"
-        DateUtils.isToday(date + DateUtils.DAY_IN_MILLIS) -> "Dün"
-        else -> {
-            val sameYear = Calendar.getInstance().apply { timeInMillis = date }.get(Calendar.YEAR) ==
-                Calendar.getInstance().get(Calendar.YEAR)
-            DateUtils.formatDateTime(this, date, DateUtils.FORMAT_SHOW_DATE or if (sameYear) DateUtils.FORMAT_NO_YEAR else 0)
-        }
     }
 
     private fun duration(sec: Long) = if (sec < 60) "$sec sn" else "${sec / 60} dk${if (sec % 60 > 0) " ${sec % 60} sn" else ""}"

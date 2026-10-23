@@ -71,6 +71,53 @@ fun Context.chip(text: String, fg: Int, bg: Int) = label(text, 13f, fg, bold = t
     setPadding(dp(12), dp(5), dp(12), dp(5))
 }
 
+// ---- Türkçe biçimler ----
+// Telefonun sistem dili İngilizce olabiliyor; tarih ve etiketler uygulamada hep Türkçe yazılır.
+
+val TR: java.util.Locale = java.util.Locale.forLanguageTag("tr-TR")
+
+private fun sameDay(a: Long, b: Long): Boolean {
+    val ca = java.util.Calendar.getInstance().apply { timeInMillis = a }
+    val cb = java.util.Calendar.getInstance().apply { timeInMillis = b }
+    return ca.get(java.util.Calendar.YEAR) == cb.get(java.util.Calendar.YEAR) &&
+        ca.get(java.util.Calendar.DAY_OF_YEAR) == cb.get(java.util.Calendar.DAY_OF_YEAR)
+}
+
+fun timeOf(ms: Long): String = java.text.SimpleDateFormat("HH:mm", TR).format(java.util.Date(ms))
+
+/** "Bugün", "Dün", "23 Ekim" ya da "23 Ekim 2025". */
+fun dayLabel(ms: Long): String {
+    val now = System.currentTimeMillis()
+    return when {
+        sameDay(ms, now) -> "Bugün"
+        sameDay(ms, now - 24 * 60 * 60 * 1000L) -> "Dün"
+        java.util.Calendar.getInstance().apply { timeInMillis = ms }.get(java.util.Calendar.YEAR) ==
+            java.util.Calendar.getInstance().get(java.util.Calendar.YEAR) ->
+            java.text.SimpleDateFormat("d MMMM", TR).format(java.util.Date(ms))
+        else -> java.text.SimpleDateFormat("d MMMM yyyy", TR).format(java.util.Date(ms))
+    }
+}
+
+/** Kısa zaman: "Bugün 14:05", "Dün 09:12", "23 Ekim 18:40". */
+fun whenLabel(ms: Long) = "${dayLabel(ms)} ${timeOf(ms)}"
+
+/** Rehberdeki numara türü (ContactsContract.CommonDataKinds.Phone.TYPE_*). */
+fun phoneTypeLabel(type: Int, custom: String?): String = when (type) {
+    1 -> "Ev"
+    2 -> "Mobil"
+    3 -> "İş"
+    4, 5, 13 -> "Faks"
+    12 -> "Ana"
+    0 -> custom?.takeIf { it.isNotBlank() } ?: "Diğer"
+    else -> "Diğer"
+}
+
+/** Liste başlığı için ilk harf; harfle başlamıyorsa "#". */
+fun firstLetter(name: String): String {
+    val cp = name.trimStart().codePointAt(0).takeIf { name.isNotBlank() } ?: return "#"
+    return if (Character.isLetter(cp)) String(Character.toChars(cp)).uppercase(TR) else "#"
+}
+
 /** Rengin saydamlığını değiştirir (ör. yumuşak arka plan için). */
 fun withAlpha(color: Int, alpha: Int) = (color and 0x00FFFFFF) or (alpha shl 24)
 
@@ -111,7 +158,9 @@ class RoundButton(
         addView(circle, LayoutParams(ctx.dp(sizeDp), ctx.dp(sizeDp)))
         caption.gravity = android.view.Gravity.CENTER
         addView(caption, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply { topMargin = ctx.dp(6) })
+        // Daire de altındaki yazı da dokunulabilir
         circle.setOnClickListener { onClick() }
+        setOnClickListener { onClick() }
         setActive(false)
     }
 
