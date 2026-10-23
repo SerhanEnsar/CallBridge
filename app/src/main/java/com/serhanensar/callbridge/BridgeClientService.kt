@@ -8,11 +8,15 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.telecom.DisconnectCause
-import android.util.Log
+import android.telecom.TelecomManager
 import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.InetAddress
@@ -24,8 +28,9 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
- * Yanıtlayan cihazda (telefon) çalışır. Tablete bağlı kalır, gelen çağrıyı
- * tam ekran gösterir ve kullanıcının seçimini komut olarak geri yollar.
+ * Yanıtlayan cihazda (telefon) çalışır. Tablete bağlı kalır; gelen çağrıyı Samsung'un çağrı
+ * ekranında (CallBridge arama hesabı üzerinden) ya da kendi ekranında gösterir, seçimi komut
+ * olarak tablete yollar ve ses bu telefondaysa CallAudio ile çalar/kaydeder.
  *
  * HotspotTTL VPN'i bu paketi dışarıda bırakır (addDisallowedApplication); soket
  * ayrıca Wi-Fi ağına bağlanır.
@@ -42,8 +47,16 @@ class BridgeClientService : Service() {
         val test: Boolean,
         val since: Long,
         val outgoing: Boolean = false,
+        val answeredBy: String? = null, // çağrıyı açan cihaz ya da "tablet"
+        val audioTo: String? = null, // ses hangi cihazda; null: tablette
     ) {
         val title get() = name ?: number ?: "Bilinmeyen numara"
+        val answeredHere get() = answeredBy == ME
+    }
+
+    /** Tabletin arama kaydından bir satır. */
+    data class HistoryEntry(val number: String, val name: String?, val type: String, val date: Long, val duration: Long) {
+        val title get() = name ?: number
     }
 
     @Volatile private var running = false
@@ -55,6 +68,14 @@ class BridgeClientService : Service() {
     private lateinit var ringer: Ringer
     private lateinit var callAudio: CallAudio
     private var proximity: PowerManager.WakeLock? = null
+    private val main = Handler(Looper.getMainLooper())
+
+    /** Sistemin çağrı ekranındaki çağrı (gelen ya da rehberden giden); null ise çağrı bizim ekranımızda. */
+    @Volatile private var connection: BridgeConnection? = null
+    /** Gelen çağrı sisteme bildirildi, yanıt bekleniyor (gelmezse kendi zilimize dönülür). */
+    @Volatile private var incomingPending = false
+    /** Bu görüşmede ses buradan bırakıldı ("Tablete bırak" ya da başka cihaza alındı). */
+    @Volatile private var audioReleased = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,7 +84,7 @@ class BridgeClientService : Service() {
         Bridge.initLog(this)
         Bridge.ensureChannels(this)
         ringer = Ringer(this)
-        callAudio = CallAudio(this, network = { wifiNetwork() }, host = { hostAddress }, onRoute = ::updateProximity)
+        callAudio = CallAudio(this, network = { wifiNetwork() }, host = { hostAddress }, onRoute = ::onRoute)
         @Suppress("DEPRECATION")
         proximity = getSystemService(PowerManager::class.java)
             .takeIf { it.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK) }
@@ -128,6 +149,8 @@ class BridgeClientService : Service() {
             if (call?.state == Bridge.STATE_RINGING) ringSilenced = true
             ringer.stop()
         }
+        if (cmd == "audio_on") audioReleased = false
+        if (cmd == "audio_off") audioReleased = true
         val ok = line?.send(Bridge.msg("cmd", "cmd" to cmd, *extra)) == true
         if (!ok) lastResult = "Tablete bağlı değil"
         return ok
@@ -137,9 +160,6 @@ class BridgeClientService : Service() {
      * Tabletin bu numarayı aramasını ister. Çağrı hemen giden arama olarak kurulur (çağrı ekranı
      * açılınca bulabilsin); tablet aramayı başlatamazsa geri alınır.
      */
-    /** Sistemin çağrı ekranındaki giden arama (rehberden yapılan); null ise çağrı bizim ekranımızda. */
-    @Volatile private var connection: BridgeConnection? = null
-
     private fun beginDial(number: String, name: String?, conn: BridgeConnection? = null): Boolean {
         if (line == null) {
             lastResult = "Tablete bağlı değil"
@@ -152,11 +172,72 @@ class BridgeClientService : Service() {
         lastResult = null
         connection = conn
         setCall(Call(Bridge.STATE_OFFHOOK, number, name, muted = false, speaker = false, test = false,
-            since = System.currentTimeMillis(), outgoing = true))
+            since = System.currentTimeMillis(), outgoing = true, answeredBy = ME))
         thread(isDaemon = true) {
             if (!send("dial", "number" to number, "name" to name)) setCall(null)
         }
         return true
+    }
+
+    // ---- sistem çağrı ekranı (Telecom) ----
+
+    /** Gelen çağrıyı CallBridge arama hesabı üzerinden sisteme bildirir: Samsung'un ekranında çalar. */
+    private fun offerToSystem(c: Call) {
+        if (!PhoneAccounts.isEnabled(this)) {
+            ringHere(c, fresh = true)
+            return
+        }
+        incomingPending = true
+        try {
+            getSystemService(TelecomManager::class.java).addNewIncomingCall(
+                PhoneAccounts.handle(this),
+                Bundle().apply {
+                    putParcelable(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS, Uri.fromParts("tel", c.number ?: "", null))
+                },
+            )
+        } catch (e: Exception) {
+            Bridge.warn("Gelen çağrı sisteme verilemedi: $e")
+            incomingPending = false
+            ringHere(c, fresh = true)
+            return
+        }
+        // Sistem yanıt vermezse kendi zilimize dön
+        main.postDelayed({
+            if (incomingPending && connection == null && call?.state == Bridge.STATE_RINGING) {
+                Bridge.warn("Sistem gelen çağrıyı açmadı; CallBridge ekranında çalınıyor")
+                incomingPending = false
+                call?.let { ringHere(it, fresh = true) }
+            }
+        }, 1500)
+    }
+
+    /** ConnectionService gelen çağrı bağlantısını kurdu. */
+    private fun attachIncoming(conn: BridgeConnection) {
+        incomingPending = false
+        val c = call
+        if (c == null || c.state != Bridge.STATE_RINGING) {
+            conn.finish(DisconnectCause.MISSED)
+            return
+        }
+        connection = conn
+        conn.update(c)
+        Bridge.log("Gelen çağrı sistem ekranında")
+    }
+
+    private fun incomingFailed() {
+        incomingPending = false
+        Bridge.warn("Sistem gelen çağrıyı reddetti; CallBridge ekranında çalınıyor")
+        call?.takeIf { it.state == Bridge.STATE_RINGING }?.let { ringHere(it, fresh = true) }
+    }
+
+    /** Sistem ekranı olmadan: kendi zilimiz ve tam ekran bildirimimiz. */
+    private fun ringHere(c: Call, fresh: Boolean) {
+        val openScreen = fresh && BridgeActivity.visible
+        if (fresh && !ringSilenced) ringer.start()
+        CallNotifier.incoming(this, c, alert = fresh, quiet = openScreen || IncomingCallActivity.visible)
+        if (openScreen) {
+            startActivity(Intent(this, IncomingCallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
     }
 
     // ---- bağlantı ----
@@ -213,7 +294,7 @@ class BridgeClientService : Service() {
             val l = Line(it)
             val hello = l.read() ?: throw IllegalStateException("tablet yanıt vermedi")
             val nonce = hello.optString("nonce")
-            l.send(Bridge.msg("auth", "mac" to Bridge.mac(Bridge.pin(this), nonce), "name" to Build.MODEL))
+            l.send(Bridge.msg("auth", "mac" to Bridge.mac(Bridge.pin(this), nonce), "name" to ME, "kind" to "phone"))
             val auth = l.read() ?: throw IllegalStateException("tablet bağlantıyı kapattı")
             if (auth.optString("t") != "auth_ok") {
                 pinFailed = true
@@ -225,6 +306,7 @@ class BridgeClientService : Service() {
             hostAddress = host
             lostAt = 0L // tablet bağlanınca ilk mesajında güncel çağrı durumunu yollar
             setStatus("Bağlı: ${host.hostAddress}")
+            l.send(Bridge.msg("cmd", "cmd" to "history"))
             while (running) {
                 val m = l.read() ?: run {
                     Bridge.warn("Tablet bağlantıyı kapattı")
@@ -232,28 +314,44 @@ class BridgeClientService : Service() {
                 } ?: break
                 when (m.optString("t")) {
                     "state" -> onState(m)
-                    "result" -> {
-                        val ok = m.optBoolean("ok")
-                        lastResult = if (ok) null else m.optString("error", "Komut başarısız")
-                        if (m.optString("cmd") == "dial" && call?.outgoing == true) {
-                            if (ok) {
-                                connection?.connected()
-                            } else {
-                                val error = lastResult
-                                connection?.finish(DisconnectCause.ERROR, error)
-                                connection = null
-                                setCall(null)
-                                lastResult = error // setCall(null) siler; arama ekranı gösterebilsin
-                            }
-                        }
-                    }
+                    "result" -> onResult(m)
                     "audio" -> {
-                        audioActive = m.optBoolean("active")
+                        val active = m.optBoolean("active")
+                        if (audioActive && !active && call?.state == Bridge.STATE_OFFHOOK) audioReleased = true
+                        audioActive = active
                         audioError = m.optString("error").ifEmpty { null }
+                        call?.let { c -> main.post { syncCall(c, c) } }
                     }
+                    "history" -> onHistory(m)
                 }
             }
         }
+    }
+
+    private fun onResult(m: JSONObject) {
+        val ok = m.optBoolean("ok")
+        if (m.optString("cmd") == "history") return
+        lastResult = if (ok) null else m.optString("error", "Komut başarısız")
+        if (m.optString("cmd") == "dial" && call?.outgoing == true) {
+            if (ok) {
+                connection?.connected()
+            } else {
+                val error = lastResult
+                connection?.finish(DisconnectCause.ERROR, error)
+                connection = null
+                setCall(null)
+                lastResult = error // setCall(null) siler; arama ekranı gösterebilsin
+            }
+        }
+    }
+
+    private fun onHistory(m: JSONObject) {
+        val arr = m.optJSONArray("calls") ?: return
+        history = (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            HistoryEntry(o.optString("number"), o.optString("name").ifEmpty { null }, o.optString("type"), o.optLong("date"), o.optLong("duration"))
+        }
+        historyVersion++
     }
 
     private fun onState(m: JSONObject) {
@@ -274,6 +372,8 @@ class BridgeClientService : Service() {
                 test = m.optBoolean("test"),
                 since = since,
                 outgoing = m.optBoolean("outgoing"),
+                answeredBy = m.optString("answered_by").ifEmpty { null } ?: prev?.answeredBy?.takeIf { state == prev.state },
+                audioTo = m.optString("audio_to").ifEmpty { null },
             )
         )
     }
@@ -283,55 +383,101 @@ class BridgeClientService : Service() {
         call = new
         if (new?.state != Bridge.STATE_RINGING || prev?.state != Bridge.STATE_RINGING) ringSilenced = false
         if (new?.state != Bridge.STATE_RINGING) ringer.stop()
-        if (new?.state == Bridge.STATE_OFFHOOK) callAudio.start(systemRouted = connection != null) else {
-            callAudio.stop()
-            updateProximity("—")
-        }
         if (new == null) {
-            connection?.finish(DisconnectCause.REMOTE)
+            // Hiç açılmadan biten gelen çağrı cevapsızdır
+            connection?.finish(if (prev?.state == Bridge.STATE_RINGING) DisconnectCause.MISSED else DisconnectCause.REMOTE)
             connection = null
-        }
-        if (prev?.state == Bridge.STATE_OFFHOOK && new?.state != Bridge.STATE_OFFHOOK && running) {
-            showForeground(CallNotifier.status(this, status, connected = line != null), microphone = false)
-        }
-        when {
-            new == null -> {
-                CallNotifier.cancelIncoming(this)
-                if (prev != null) refreshStatus()
-            }
-            new.state == Bridge.STATE_RINGING -> {
-                // Numara ikinci mesajla gelebilir; zili baştan çaldırmadan güncelle
-                val fresh = prev?.state != Bridge.STATE_RINGING
-                val openScreen = fresh && BridgeActivity.visible
-                if (fresh && !ringSilenced) ringer.start()
-                CallNotifier.incoming(this, new, alert = fresh, quiet = openScreen || IncomingCallActivity.visible)
-                if (openScreen) {
-                    startActivity(Intent(this, IncomingCallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
-            }
-            else -> {
-                CallNotifier.cancelIncoming(this)
-                showForeground(CallNotifier.ongoing(this, new), microphone = true)
-            }
-        }
-        if (new == null) {
+            incomingPending = false
+            audioReleased = false
             lastResult = null
             audioActive = false
             audioError = null
+            callAudio.stop()
+            updateProximity()
+            CallNotifier.cancelIncoming(this)
+            if (prev != null) {
+                if (running) showForeground(CallNotifier.status(this, status, connected = line != null), microphone = false)
+                thread(isDaemon = true) { line?.send(Bridge.msg("cmd", "cmd" to "history")) } // yeni arama kayda düştü
+            }
+            return
+        }
+        main.post { syncCall(prev, new) }
+    }
+
+    /** Çağrı ya da ses durumu değişince: sistem ekranı, ses ve bildirimler buna uyar. Ana iş parçacığında. */
+    private fun syncCall(prev: Call?, c: Call) {
+        if (call !== c && call?.state != c.state) return // bu arada yenisi geldi
+        when (c.state) {
+            Bridge.STATE_RINGING -> {
+                val fresh = prev?.state != Bridge.STATE_RINGING
+                val conn = connection
+                when {
+                    conn != null -> conn.update(c)
+                    fresh -> offerToSystem(c)
+                    !incomingPending -> ringHere(c, fresh = false) // numara sonradan geldi
+                }
+            }
+            Bridge.STATE_OFFHOOK -> {
+                CallNotifier.cancelIncoming(this)
+                ringer.stop()
+                val here = wantsAudio(c)
+                val conn = connection
+                if (conn != null) {
+                    when {
+                        here -> conn.connected()
+                        // Başka cihazda açıldı ya da ses başka yere alındı: sistem ekranını komut göndermeden kapat
+                        c.answeredBy != null && !c.answeredHere && prev?.state == Bridge.STATE_RINGING ->
+                            conn.finish(DisconnectCause.ANSWERED_ELSEWHERE)
+                        else -> conn.finish(DisconnectCause.OTHER, "Ses ${placeOf(c)} sürüyor")
+                    }
+                    if (!here) connection = null
+                }
+                if (here) callAudio.start(systemRouted = connection != null) else callAudio.stop()
+                updateProximity()
+                showForeground(
+                    when {
+                        !here -> CallNotifier.elsewhere(this, c, placeOf(c))
+                        connection != null -> CallNotifier.relaying(this, c, callAudio.route)
+                        else -> CallNotifier.ongoing(this, c)
+                    },
+                    microphone = here,
+                )
+            }
+        }
+    }
+
+    /** Ses bu telefonda mı: tablet aktarıyorsa ya da çağrıyı biz açtık/aradık ve bırakmadık. */
+    private fun wantsAudio(c: Call): Boolean {
+        if (c.state != Bridge.STATE_OFFHOOK) return false
+        if (c.audioTo != null) return c.audioTo == ME
+        if (audioActive) return true
+        return c.answeredHere && !audioReleased && audioError == null
+    }
+
+    private fun placeOf(c: Call) = when (c.audioTo ?: c.answeredBy) {
+        null, CallHostService.TABLET -> "tablette"
+        else -> "${c.audioTo ?: c.answeredBy} cihazında"
+    }
+
+    private fun onRoute(route: String) {
+        updateProximity()
+        val c = call ?: return
+        if (connection != null && c.state == Bridge.STATE_OFFHOOK && wantsAudio(c)) {
+            getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, CallNotifier.relaying(this, c, route))
         }
     }
 
     /** Ses ahizedeyken telefon kulağa yaklaşınca ekran kapansın (yanlışlıkla dokunmayı önler). */
     @Synchronized
-    private fun updateProximity(route: String) {
+    private fun updateProximity() {
         val lock = proximity ?: return
-        val want = route == CallAudio.ROUTE_EARPIECE && call?.state == Bridge.STATE_OFFHOOK
+        val want = callAudio.isRunning && callAudio.route == CallAudio.ROUTE_EARPIECE
         if (want && !lock.isHeld) lock.acquire(4 * 60 * 60 * 1000L)
         if (!want && lock.isHeld) lock.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY)
     }
 
     /**
-     * Görüşmede servis mikrofon türüne geçer (arka planda mikrofon için gerekli). Android bunu
+     * Ses buradayken servis mikrofon türüne geçer (arka planda mikrofon için gerekli). Android bunu
      * yalnızca kullanıcı etkileşiminden sonra izin verir; olmazsa bildirim yine güncellenir.
      */
     private fun showForeground(n: android.app.Notification, microphone: Boolean) {
@@ -386,6 +532,9 @@ class BridgeClientService : Service() {
         private const val READ_TIMEOUT_MS = 45_000
         private const val LINK_GRACE_MS = 10_000L
 
+        /** Bu cihazın tabletteki adı (answered_by / audio_to ile karşılaştırılır). */
+        val ME: String = Build.MODEL
+
         @Volatile var instance: BridgeClientService? = null
             private set
         @Volatile var call: Call? = null
@@ -402,8 +551,17 @@ class BridgeClientService : Service() {
         @Volatile var audioError: String? = null
             private set
 
+        /** Tabletin son aramaları; her güncellemede historyVersion artar. */
+        @Volatile var history: List<HistoryEntry> = emptyList()
+            private set
+        @Volatile var historyVersion = 0
+            private set
+
         val isRunning get() = instance != null
         val isConnected get() = instance?.line != null
+
+        /** Ses şu an bu telefonda mı (çağrı ekranı için). */
+        val audioHere get() = instance?.let { s -> call?.let { c -> s.wantsAudio(c) } } == true
 
         fun start(ctx: Context) {
             ctx.startForegroundService(Intent(ctx, BridgeClientService::class.java))
@@ -443,6 +601,22 @@ class BridgeClientService : Service() {
                 return false
             }
             return s.beginDial(number, name)
+        }
+
+        /** BridgeConnectionService'ten: sistem gelen çağrı bağlantısını kurdu ya da kuramadı. */
+        fun incomingConnection(conn: BridgeConnection?) {
+            val s = instance
+            if (s == null) {
+                conn?.finish(DisconnectCause.MISSED)
+                return
+            }
+            if (conn != null) s.attachIncoming(conn) else s.incomingFailed()
+        }
+
+        /** Arama kaydını yeniden ister (arama ekranı açılınca). */
+        fun refreshHistory() {
+            val s = instance ?: return
+            thread(isDaemon = true) { s.line?.send(Bridge.msg("cmd", "cmd" to "history")) }
         }
 
         fun gateway(ctx: Context): InetAddress? {

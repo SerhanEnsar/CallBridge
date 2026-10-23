@@ -19,10 +19,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -41,7 +43,10 @@ import kotlin.concurrent.thread
  */
 class CallHostService : Service() {
 
-    private class Peer(val line: Line, val name: String)
+    /** Bağlı bir cihaz; kind: "phone" | "mac". */
+    private class Peer(val line: Line, val name: String, val kind: String) {
+        val ip: String get() = line.socket.inetAddress.hostAddress ?: ""
+    }
 
     private var server: ServerSocket? = null
     @Volatile private var running = false
@@ -57,6 +62,7 @@ class CallHostService : Service() {
     private var test = false
     private var speaker = false
     private var outgoing = false // telefondan istenen giden arama
+    private var answeredBy: String? = null // çağrıyı açan cihazın adı ya da "tablet"
     private var ringMutedByUs = false
 
     private val phoneReceiver = object : BroadcastReceiver() {
@@ -198,7 +204,9 @@ class CallHostService : Service() {
             line.send(Bridge.msg("auth_fail"))
             return
         }
-        val peer = Peer(line, auth.optString("name", "?"))
+        val peer = Peer(line, auth.optString("name", "?"), auth.optString("kind", "phone"))
+        // Görüşme sürerken kopup yeniden bağlanan cihaz sesin sahibiyse yeni bağlantıyla eşleştir
+        audioPeer?.let { if (it !== peer && it.name == peer.name && it.ip == peer.ip) audioPeer = peer }
         line.send(Bridge.msg("auth_ok"))
         line.send(stateMessage())
         peers.add(peer)
@@ -211,7 +219,8 @@ class CallHostService : Service() {
                     "ping" -> line.send(Bridge.msg("pong"))
                     "cmd" -> {
                         val cmd = m.optString("cmd")
-                        val error = execute(cmd, peer, m)
+                        if (cmd == "history") line.send(historyMessage())
+                        val error = if (cmd == "history") null else execute(cmd, peer, m)
                         Bridge.log("Komut $cmd: ${error ?: "tamam"}")
                         line.send(Bridge.msg("result", "cmd" to cmd, "ok" to (error == null), "error" to error))
                     }
@@ -242,7 +251,40 @@ class CallHostService : Service() {
             "speaker" to speaker,
             "test" to test,
             "outgoing" to outgoing,
+            "answered_by" to answeredBy,
+            "audio_to" to audioTo,
         )
+    }
+
+    /** Tabletin arama kaydından son aramalar: {"t":"history","calls":[{number,name,type,date,duration}]} */
+    private fun historyMessage(): JSONObject {
+        val calls = JSONArray()
+        if (checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+            try {
+                contentResolver.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
+                    null, null, CallLog.Calls.DATE + " DESC",
+                )?.use { c ->
+                    while (c.moveToNext() && calls.length() < 100) {
+                        calls.put(JSONObject().apply {
+                            put("number", c.getString(0) ?: "")
+                            put("name", c.getString(1) ?: "")
+                            put("type", when (c.getInt(2)) {
+                                CallLog.Calls.OUTGOING_TYPE -> "out"
+                                CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> "missed"
+                                else -> "in"
+                            })
+                            put("date", c.getLong(3))
+                            put("duration", c.getLong(4))
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                Bridge.warn("Arama kaydı okunamadı: $e")
+            }
+        }
+        return Bridge.msg("history", "calls" to calls)
     }
 
     // ---- çağrı durumu ----
@@ -261,11 +303,16 @@ class CallHostService : Service() {
             }
             state = newState
             if (changed && newState == Bridge.STATE_RINGING) silenceNow = Bridge.autoSilence(this) && peers.isNotEmpty()
+            // Komut gelmeden başlayan görüşme tablette açılmıştır; ses tablette kalır
+            if (changed && newState == Bridge.STATE_OFFHOOK && answeredBy == null) {
+                answeredBy = audioPeer?.name ?: TABLET
+            }
             if (newState == Bridge.STATE_IDLE) {
                 number = null
                 name = null
                 speaker = false
                 outgoing = false
+                answeredBy = null
             }
         }
         if (silenceNow) silenceRinger()
@@ -274,6 +321,7 @@ class CallHostService : Service() {
             try { audio.isMicrophoneMute = false } catch (_: Exception) {}
             if (audioPeer != null) {
                 audioPeer = null
+                audioTo = null
                 thread(isDaemon = true) { relayRequest(Bridge.msg("stop")) }
             }
         }
@@ -284,8 +332,10 @@ class CallHostService : Service() {
 
     // ---- ses aktarımı (shell yetkili RelayDaemon üzerinden) ----
 
-    /** Sesin aktarıldığı telefon; null ise ses tablette kalır. */
+    /** Sesin aktarılacağı cihaz; null ise ses tablette kalır. */
     @Volatile private var audioPeer: Peer? = null
+    /** Aktarım gerçekten başladıysa sesin gittiği cihazın adı (durum mesajındaki audio_to). */
+    @Volatile private var audioTo: String? = null
 
     private fun relayRequest(msg: JSONObject): JSONObject? = try {
         Socket().use { s ->
@@ -299,8 +349,9 @@ class CallHostService : Service() {
         null
     }
 
+    @Synchronized
     private fun startRelay(p: Peer) {
-        val reply = relayRequest(Bridge.msg("start", "ip" to p.line.socket.inetAddress.hostAddress))
+        val reply = relayRequest(Bridge.msg("start", "ip" to p.ip))
         val error = when {
             reply == null -> "Tablette ses aktarıcısı çalışmıyor; ses tablette kaldı"
             reply.optBoolean("active") -> null
@@ -308,13 +359,25 @@ class CallHostService : Service() {
         }
         relayReady = reply != null
         Bridge.log("Ses aktarımı → ${p.name}: ${error ?: "başladı"}")
+        // Ses başka bir cihazdan alındıysa o cihaza artık sesin onda olmadığını bildir
+        val prev = audioTo
+        audioTo = if (error == null) p.name else null
+        if (prev != null && prev != p.name) peers.filter { it.name == prev }.forEach { it.line.send(Bridge.msg("audio", "active" to false)) }
         p.line.send(Bridge.msg("audio", "active" to (error == null), "error" to error))
+        broadcast()
+        refreshNotification()
     }
 
+    /** Ses tablete döner (tablette konuşmak için). */
+    @Synchronized
     private fun stopRelay(p: Peer) {
+        val prev = audioTo
         audioPeer = null
+        audioTo = null
         relayRequest(Bridge.msg("stop"))
-        p.line.send(Bridge.msg("audio", "active" to false))
+        peers.filter { it === p || it.name == prev }.forEach { it.line.send(Bridge.msg("audio", "active" to false)) }
+        broadcast()
+        refreshNotification()
     }
 
     private fun contactName(number: String): String? {
@@ -334,12 +397,13 @@ class CallHostService : Service() {
     /** Komutu uygular; hata varsa açıklamasını döndürür. */
     private fun execute(cmd: String, peer: Peer, m: JSONObject): String? {
         if (cmd == "test") return startTest()
-        if (synchronized(this) { test }) return executeTest(cmd)
+        if (synchronized(this) { test }) return executeTest(cmd, peer)
         return try {
             when (cmd) {
                 "accept" -> {
                     if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) return "Tablette çağrı yanıtlama izni yok"
-                    audioPeer = peer // görüşme başlayınca ses bu telefona gelir
+                    audioPeer = peer // görüşme başlayınca ses bu cihaza gelir
+                    synchronized(this) { answeredBy = peer.name }
                     telecom.acceptRingingCall()
                     null
                 }
@@ -354,6 +418,7 @@ class CallHostService : Service() {
                         number = n
                         name = contactName(n) ?: m.optString("name").ifEmpty { null }
                         outgoing = true
+                        answeredBy = peer.name
                     }
                     audioPeer = peer // görüşme başlayınca ses bu telefona gelir
                     telecom.placeCall(Uri.fromParts("tel", n, null), Bundle())
@@ -453,9 +518,18 @@ class CallHostService : Service() {
         return null
     }
 
-    private fun executeTest(cmd: String): String? {
+    /** Test çağrısında ses aktarılmaz; kimin açtığı ve sesin kimde olduğu yine de taklit edilir. */
+    private fun executeTest(cmd: String, peer: Peer): String? {
         when (cmd) {
-            "accept" -> synchronized(this) { state = Bridge.STATE_OFFHOOK }
+            "accept" -> {
+                synchronized(this) {
+                    state = Bridge.STATE_OFFHOOK
+                    answeredBy = peer.name
+                }
+                fakeAudioTo(peer)
+            }
+            "audio_on" -> fakeAudioTo(peer)
+            "audio_off" -> fakeAudioTo(null)
             "end" -> { endTest(); return null }
             "speaker_on", "speaker_off" -> synchronized(this) { speaker = cmd == "speaker_on" }
             "silence", "mute", "unmute" -> {}
@@ -465,9 +539,18 @@ class CallHostService : Service() {
         return null
     }
 
+    private fun fakeAudioTo(p: Peer?) {
+        val prev = audioTo
+        audioTo = p?.name
+        peers.filter { it.name == prev && it !== p }.forEach { it.line.send(Bridge.msg("audio", "active" to false)) }
+        p?.line?.send(Bridge.msg("audio", "active" to true))
+    }
+
     private fun endTest() {
+        audioTo = null
         synchronized(this) {
             test = false
+            answeredBy = null
             state = Bridge.STATE_IDLE
             number = null
             name = null
@@ -485,11 +568,20 @@ class CallHostService : Service() {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, BridgeActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
+        val onMac = audioTo != null && peers.any { it.name == audioTo && it.kind == KIND_MAC }
         return Notification.Builder(this, Bridge.CHANNEL_STATUS)
-            .setSmallIcon(if (n == 0) R.drawable.ic_link_off else R.drawable.ic_link)
+            .setSmallIcon(when {
+                n == 0 -> R.drawable.ic_link_off
+                onMac -> R.drawable.ic_desktop
+                else -> R.drawable.ic_link
+            })
             .setColor(if (n == 0) Bridge.COLOR_OFFLINE else Bridge.COLOR_READY)
-            .setContentTitle(if (n == 0) "Köprü açık, telefon bekleniyor" else "Köprü hazır")
-            .setContentText(if (n == 0) "PIN: ${Bridge.pin(this)}" else "$n telefon bağlı")
+            .setContentTitle(if (n == 0) "Köprü açık, cihaz bekleniyor" else "Köprü hazır")
+            .setContentText(when {
+                n == 0 -> "PIN: ${Bridge.pin(this)}"
+                audioTo != null -> "Ses: $audioTo · ${peers.joinToString { it.name }} bağlı"
+                else -> peers.joinToString { it.name } + " bağlı"
+            })
             .setContentIntent(open)
             .setOngoing(true)
             .build()
@@ -505,6 +597,9 @@ class CallHostService : Service() {
         private const val NOTIFICATION_ID = 10
         private const val READ_TIMEOUT_MS = 60_000
         private const val IDLE_CONFIRM_MS = 3000L
+        const val TABLET = "tablet" // answered_by: çağrı tablette açıldı
+        const val KIND_PHONE = "phone"
+        const val KIND_MAC = "mac"
 
         @Volatile var instance: CallHostService? = null
             private set
@@ -512,6 +607,10 @@ class CallHostService : Service() {
 
         val isRunning get() = instance != null
         val peerCount get() = instance?.peers?.size ?: 0
+
+        /** Ekran için bağlı cihazlar: ad, tür ("phone" | "mac"), ses bu cihazda mı. */
+        val devices: List<Triple<String, String, Boolean>>
+            get() = instance?.let { s -> s.peers.map { Triple(it.name, it.kind, it.name == s.audioTo) } } ?: emptyList()
 
         /** Ses aktarıcısı (RelayDaemon) son denetimde yanıt verdi mi; null: henüz bilinmiyor. */
         @Volatile var relayReady: Boolean? = null

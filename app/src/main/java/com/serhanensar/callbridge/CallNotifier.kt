@@ -79,6 +79,37 @@ object CallNotifier {
         ctx.getSystemService(NotificationManager::class.java).cancel(INCOMING_ID)
     }
 
+    /**
+     * Çağrı sistemin (Samsung'un) çağrı ekranındayken: o ekran zaten çağrıyı gösteriyor, bu yüzden
+     * burada yalnızca sade bir "ses bu telefonda" bildirimi durur (çift çağrı bildirimi olmasın).
+     */
+    fun relaying(ctx: Context, call: BridgeClientService.Call, route: String): Notification =
+        Notification.Builder(ctx, Bridge.CHANNEL_STATUS)
+            .setSmallIcon(R.drawable.ic_call)
+            .setColor(Bridge.COLOR_READY)
+            .setContentTitle("Ses bu telefonda")
+            .setContentText(call.title + if (route != CallAudio.ROUTE_SYSTEM && route != "—") " · $route" else "")
+            .setContentIntent(activity(ctx, BridgeActivity::class.java, 0))
+            .setOngoing(true)
+            .build()
+
+    /** Görüşme sürüyor ama ses başka yerde (tablette ya da başka bir cihazda): sesi buraya al. */
+    fun elsewhere(ctx: Context, call: BridgeClientService.Call, place: String): Notification =
+        Notification.Builder(ctx, Bridge.CHANNEL_STATUS)
+            .setSmallIcon(R.drawable.ic_call)
+            .setColor(Bridge.COLOR_OFFLINE)
+            .setContentTitle(call.title)
+            .setContentText("Görüşme $place sürüyor")
+            .setCategory(Notification.CATEGORY_CALL)
+            .setOngoing(true)
+            .setWhen(call.since)
+            .setUsesChronometer(true)
+            .setShowWhen(true)
+            .setContentIntent(activity(ctx, IncomingCallActivity::class.java, 1))
+            .addAction(Notification.Action.Builder(null, "Bu cihaza al", command(ctx, "audio_on", 5)).build())
+            .addAction(Notification.Action.Builder(null, "Kapat", command(ctx, "end", 6)).build())
+            .build()
+
     private fun subtitle(call: BridgeClientService.Call, base: String) = buildString {
         if (call.name != null && call.number != null) append(call.number).append(" · ")
         append(base)
