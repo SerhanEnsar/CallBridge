@@ -16,7 +16,9 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
@@ -67,9 +69,29 @@ class CallHostService : Service() {
                 TelephonyManager.EXTRA_STATE_OFFHOOK -> Bridge.STATE_OFFHOOK
                 else -> Bridge.STATE_IDLE
             }
+            // Samsung'da giden arama açılırken durum bir anlığına boşta'ya düşüp görüşmede'ye dönüyor;
+            // görüşmedeyken gelen boşta, kısa bir süre doğrulanmadan çağrının bitişi sayılmaz.
+            if (newState == Bridge.STATE_IDLE && synchronized(this@CallHostService) { state } == Bridge.STATE_OFFHOOK) {
+                if (pendingIdle == null) {
+                    Bridge.log("Çağrı durumu: idle (doğrulanıyor)")
+                    pendingIdle = Runnable {
+                        pendingIdle = null
+                        onCallState(Bridge.STATE_IDLE, null)
+                    }.also { main.postDelayed(it, IDLE_CONFIRM_MS) }
+                }
+                return
+            }
+            pendingIdle?.let {
+                main.removeCallbacks(it)
+                pendingIdle = null
+                Bridge.log("Çağrı sürüyor: boşta durumu kısa sürdü")
+            }
             onCallState(newState, incoming)
         }
     }
+
+    private val main = Handler(Looper.getMainLooper())
+    private var pendingIdle: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -77,6 +99,7 @@ class CallHostService : Service() {
         super.onCreate()
         telecom = getSystemService(TelecomManager::class.java)
         audio = getSystemService(AudioManager::class.java)
+        Bridge.initLog(this)
         Bridge.ensureChannels(this)
     }
 
@@ -180,7 +203,7 @@ class CallHostService : Service() {
         line.send(stateMessage())
         peers.add(peer)
         refreshNotification()
-        Log.i(Bridge.TAG, "Bağlandı: ${peer.name} ${line.socket.inetAddress.hostAddress}")
+        Bridge.log("Bağlandı: ${peer.name} ${line.socket.inetAddress.hostAddress}")
         try {
             while (running) {
                 val m = try { line.read() } catch (_: SocketTimeoutException) { null } ?: break
@@ -189,7 +212,7 @@ class CallHostService : Service() {
                     "cmd" -> {
                         val cmd = m.optString("cmd")
                         val error = execute(cmd, peer, m)
-                        Log.i(Bridge.TAG, "Komut $cmd: ${error ?: "tamam"}")
+                        Bridge.log("Komut $cmd: ${error ?: "tamam"}")
                         line.send(Bridge.msg("result", "cmd" to cmd, "ok" to (error == null), "error" to error))
                     }
                 }
@@ -197,7 +220,7 @@ class CallHostService : Service() {
         } finally {
             peers.remove(peer)
             refreshNotification()
-            Log.i(Bridge.TAG, "Ayrıldı: ${peer.name}")
+            Bridge.log("Ayrıldı: ${peer.name}")
         }
     }
 
@@ -225,7 +248,7 @@ class CallHostService : Service() {
     // ---- çağrı durumu ----
 
     private fun onCallState(newState: String, incoming: String?) {
-        if (newState != synchronized(this) { state }) Log.i(Bridge.TAG, "Çağrı durumu: $newState")
+        if (newState != synchronized(this) { state }) Bridge.log("Çağrı durumu: $newState")
         var silenceNow = false
         synchronized(this) {
             if (test) { test = false; number = null; name = null }
@@ -284,7 +307,7 @@ class CallHostService : Service() {
             else -> reply.optString("error", "Ses aktarılamadı")
         }
         relayReady = reply != null
-        Log.i(Bridge.TAG, "Ses aktarımı → ${p.name}: ${error ?: "başladı"}")
+        Bridge.log("Ses aktarımı → ${p.name}: ${error ?: "başladı"}")
         p.line.send(Bridge.msg("audio", "active" to (error == null), "error" to error))
     }
 
@@ -481,6 +504,7 @@ class CallHostService : Service() {
         private const val ACTION_STOP = "com.serhanensar.callbridge.HOST_STOP"
         private const val NOTIFICATION_ID = 10
         private const val READ_TIMEOUT_MS = 60_000
+        private const val IDLE_CONFIRM_MS = 3000L
 
         @Volatile var instance: CallHostService? = null
             private set

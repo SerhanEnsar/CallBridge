@@ -4,13 +4,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.LocalDateTime
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -52,6 +55,36 @@ object Bridge {
     const val COLOR_OFFLINE = 0xFF8E8E93.toInt()
 
     fun prefs(ctx: Context): SharedPreferences = ctx.getSharedPreferences("callbridge", Context.MODE_PRIVATE)
+
+    // ---- kalıcı log ----
+    // Sistem logu kısa sürede silindiği için olaylar ayrıca files/callbridge.log'a yazılır
+    // (512 KB'ta bir önceki .1'e taşınır). setup.sh logs ile çekilir.
+
+    @Volatile private var logFile: File? = null
+
+    fun initLog(ctx: Context) {
+        if (logFile == null) logFile = File(ctx.filesDir, "callbridge.log")
+    }
+
+    fun log(msg: String) {
+        Log.i(TAG, msg)
+        write("I", msg)
+    }
+
+    fun warn(msg: String) {
+        Log.w(TAG, msg)
+        write("W", msg)
+    }
+
+    @Synchronized
+    private fun write(level: String, msg: String) {
+        val f = logFile ?: return
+        try {
+            if (f.length() > 512 * 1024) f.renameTo(File(f.parentFile, "callbridge.log.1"))
+            f.appendText("${LocalDateTime.now().withNano(0)} $level $msg\n")
+        } catch (_: Exception) {
+        }
+    }
 
     fun role(ctx: Context): String = prefs(ctx).getString("role", ROLE_NONE) ?: ROLE_NONE
     fun pin(ctx: Context): String = prefs(ctx).getString("pin", "") ?: ""
@@ -128,7 +161,7 @@ class Line(val socket: Socket) {
         }
         true
     } catch (e: Exception) {
-        if (!socket.isClosed) android.util.Log.w(Bridge.TAG, "Gönderilemedi (${obj.optString("t")}), bağlantı kapatılıyor: $e")
+        if (!socket.isClosed) Bridge.warn("Gönderilemedi (${obj.optString("t")}), bağlantı kapatılıyor: $e")
         close()
         false
     }

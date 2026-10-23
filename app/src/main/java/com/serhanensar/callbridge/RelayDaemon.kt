@@ -138,7 +138,7 @@ object RelayDaemon {
             Thread.sleep(1000)
             val s = session ?: continue
             idle = if (callActive()) 0 else idle + 1
-            if (idle >= 2) {
+            if (idle >= 5) { // giden arama açılırken çağrı bir anlığına görünmeyebiliyor
                 s.stop("çağrı bitti")
                 idle = 0
             }

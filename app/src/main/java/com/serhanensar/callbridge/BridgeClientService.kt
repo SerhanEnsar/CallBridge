@@ -60,6 +60,7 @@ class BridgeClientService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Bridge.initLog(this)
         Bridge.ensureChannels(this)
         ringer = Ringer(this)
         callAudio = CallAudio(this, network = { wifiNetwork() }, host = { hostAddress }, onRoute = ::updateProximity)
@@ -100,7 +101,7 @@ class BridgeClientService : Service() {
         }
         running = true
         instance = this
-        try { PhoneAccounts.register(this) } catch (e: Exception) { Log.w(Bridge.TAG, "Arama hesabı kaydedilemedi: $e") }
+        try { PhoneAccounts.register(this) } catch (e: Exception) { Bridge.warn("Arama hesabı kaydedilemedi: $e") }
         pinger = Executors.newSingleThreadScheduledExecutor().also {
             it.scheduleWithFixedDelay({ line?.send(Bridge.msg("ping")) }, PING_MS, PING_MS, TimeUnit.MILLISECONDS)
         }
@@ -172,7 +173,7 @@ class BridgeClientService : Service() {
                     session(host)
                     delay = 1000L
                 } catch (e: Exception) {
-                    Log.w(Bridge.TAG, "Bağlantı koptu: $e")
+                    Bridge.warn("Bağlantı koptu: $e")
                     line = null
                     if (!pinFailed) setStatus("Bağlantı yok: ${e.message ?: e.javaClass.simpleName}")
                 }
@@ -183,7 +184,7 @@ class BridgeClientService : Service() {
             // Görüşme sürerken kısa kopmalar çağrıyı bitirmesin: hemen yeniden bağlan, 10 sn bekle
             val inCall = call?.state == Bridge.STATE_OFFHOOK
             if (inCall && lostAt != 0L && System.currentTimeMillis() - lostAt > LINK_GRACE_MS) {
-                Log.w(Bridge.TAG, "Tablete ${LINK_GRACE_MS / 1000} sn bağlanılamadı, çağrı kapatıldı")
+                Bridge.warn("Tablete ${LINK_GRACE_MS / 1000} sn bağlanılamadı, çağrı kapatıldı")
                 setCall(null)
             }
             try { Thread.sleep(if (inCall) 500 else delay) } catch (_: InterruptedException) { break }
@@ -197,7 +198,7 @@ class BridgeClientService : Service() {
     private fun onLinkLost() {
         if (call?.state == Bridge.STATE_OFFHOOK) {
             if (lostAt == 0L) lostAt = System.currentTimeMillis()
-            Log.w(Bridge.TAG, "Görüşme sürerken tablet bağlantısı koptu; yeniden bağlanılıyor")
+            Bridge.warn("Görüşme sürerken tablet bağlantısı koptu; yeniden bağlanılıyor")
         } else {
             setCall(null)
         }
@@ -226,7 +227,7 @@ class BridgeClientService : Service() {
             setStatus("Bağlı: ${host.hostAddress}")
             while (running) {
                 val m = l.read() ?: run {
-                    Log.w(Bridge.TAG, "Tablet bağlantıyı kapattı")
+                    Bridge.warn("Tablet bağlantıyı kapattı")
                     null
                 } ?: break
                 when (m.optString("t")) {
@@ -343,7 +344,7 @@ class BridgeClientService : Service() {
         try {
             startForeground(CallNotifier.STATUS_ID, n, type)
         } catch (e: Exception) {
-            Log.w(Bridge.TAG, "Mikrofon türüne geçilemedi: $e")
+            Bridge.warn("Mikrofon türüne geçilemedi: $e")
             getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, n)
         }
     }

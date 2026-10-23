@@ -135,7 +135,7 @@ class CallAudio(
             val buf = ByteArray(HEADER + FRAME_BYTES * 4)
             val packet = DatagramPacket(buf, buf.size)
             var lastSeq = -1
-            Log.i(Bridge.TAG, "Ses alımı başladı, yol: $route")
+            Bridge.log("Ses alımı başladı, yol: $route")
             while (running) {
                 try {
                     s.receive(packet)
@@ -159,7 +159,7 @@ class CallAudio(
                 packets++
             }
         } catch (e: Exception) {
-            if (running) Log.w(Bridge.TAG, "Ses alımı durdu: $e")
+            if (running) Bridge.warn("Ses alımı durdu: $e")
         } finally {
             running = false
             try { socket?.close() } catch (_: Exception) {}
@@ -172,7 +172,7 @@ class CallAudio(
             }
             route = "—"
             onRoute(route)
-            Log.i(Bridge.TAG, "Ses alımı bitti, $packets paket, gecikme için $dropped atlandı")
+            Bridge.log("Ses alımı bitti, $packets paket, gecikme için $dropped atlandı")
         }
     }
 
@@ -212,7 +212,7 @@ class CallAudio(
             }
             val buf = ByteArray(HEADER + FRAME_BYTES)
             var seq = 0
-            Log.i(Bridge.TAG, "Mikrofon gönderimi başladı → ${dest.hostAddress}:${Bridge.MIC_PORT}")
+            Bridge.log("Mikrofon gönderimi başladı → ${dest.hostAddress}:${Bridge.MIC_PORT}")
             while (running) {
                 val n = rec.read(buf, HEADER, FRAME_BYTES)
                 if (n <= 0) continue
@@ -228,7 +228,7 @@ class CallAudio(
             s.close()
             try { rec.stop() } catch (_: Exception) {}
             rec.release()
-            Log.i(Bridge.TAG, "Mikrofon gönderimi bitti, $micPackets paket")
+            Bridge.log("Mikrofon gönderimi bitti, $micPackets paket")
         }
     }
 

@@ -6,6 +6,7 @@
 #   ./setup.sh --test               # kurulumdan sonra test çağrısı da dener
 #   ./setup.sh relay [tablet]       # yalnızca tablette ses aktarıcısını başlatır
 #   ./setup.sh relay noredirect     # aktarımda tablet hoparlörünü çağrıdan ayırma (yalnızca kıs)
+#   ./setup.sh logs                 # iki cihazın ve aktarıcının loglarını ./logs altına çeker
 #
 # Ses aktarıcısı shell yetkisiyle çalışır ve tablet yeniden başlayana kadar açık kalır;
 # her açılıştan sonra tablet USB'ye takılıyken bir kez ./setup.sh relay çalıştırılır.
@@ -23,12 +24,14 @@ RELAY_LOG=/data/local/tmp/callbridge-relay.log
 
 RUN_TEST=0
 RELAY_ONLY=0
+LOGS_ONLY=0
 RELAY_OPT=""
 ARGS=()
 for a in "$@"; do
     case "$a" in
         --test) RUN_TEST=1 ;;
         relay) RELAY_ONLY=1 ;;
+        logs) LOGS_ONLY=1 ;;
         noredirect) RELAY_OPT=noredirect ;;
         *) ARGS+=("$a") ;;
     esac
@@ -54,6 +57,18 @@ start_relay() {
         fail "Ses aktarıcısı başlamadı"
     fi
 }
+
+if [ "$LOGS_ONLY" = 1 ]; then
+    mkdir -p logs
+    for d in $("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}'); do
+        name=$("$ADB" -s "$d" shell getprop ro.product.model | tr -d '\r')
+        "$ADB" -s "$d" exec-out run-as "$PKG" sh -c 'cat files/callbridge.log.1 files/callbridge.log 2>/dev/null' > "logs/$name.log"
+        "$ADB" -s "$d" shell cat "$RELAY_LOG" 2>/dev/null > "logs/$name-relay.log" || true
+        [ -s "logs/$name-relay.log" ] || rm -f "logs/$name-relay.log"
+        ok "$name: $(wc -l < "logs/$name.log" | tr -d ' ') satır → logs/$name.log"
+    done
+    exit 0
+fi
 
 if [ "$RELAY_ONLY" = 1 ]; then
     HOST="${ARGS[0]:-}"
