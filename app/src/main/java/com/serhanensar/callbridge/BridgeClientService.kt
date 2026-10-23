@@ -1,0 +1,308 @@
+package com.serhanensar.callbridge
+
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+
+/**
+ * Yanıtlayan cihazda (telefon) çalışır. Tablete bağlı kalır, gelen çağrıyı
+ * tam ekran gösterir ve kullanıcının seçimini komut olarak geri yollar.
+ *
+ * HotspotTTL VPN'i bu paketi dışarıda bırakır (addDisallowedApplication); soket
+ * ayrıca Wi-Fi ağına bağlanır.
+ */
+class BridgeClientService : Service() {
+
+    /** Tabletten gelen son çağrı durumu. */
+    data class Call(
+        val state: String,
+        val number: String?,
+        val name: String?,
+        val muted: Boolean,
+        val speaker: Boolean,
+        val test: Boolean,
+        val since: Long,
+    ) {
+        val title get() = name ?: number ?: "Bilinmeyen numara"
+    }
+
+    @Volatile private var running = false
+    @Volatile private var line: Line? = null
+    @Volatile private var pinFailed = false
+    private var pinger: ScheduledExecutorService? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        Bridge.ensureChannels(this)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopClient()
+                return START_NOT_STICKY
+            }
+            ACTION_CMD -> {
+                startClient()
+                intent.getStringExtra(EXTRA_CMD)?.let { command(it) }
+            }
+            else -> startClient()
+        }
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        stopClient()
+        super.onDestroy()
+    }
+
+    private fun startClient() {
+        if (running) return
+        val notification = CallNotifier.status(this, "Bağlanıyor…")
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(CallNotifier.STATUS_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(CallNotifier.STATUS_ID, notification)
+        }
+        running = true
+        instance = this
+        pinger = Executors.newSingleThreadScheduledExecutor().also {
+            it.scheduleWithFixedDelay({ line?.send(Bridge.msg("ping")) }, PING_MS, PING_MS, TimeUnit.MILLISECONDS)
+        }
+        thread(name = "bridge-client", isDaemon = true) { connectLoop() }
+    }
+
+    private fun stopClient() {
+        if (!running) return
+        running = false
+        pinger?.shutdownNow()
+        pinger = null
+        line?.close()
+        line = null
+        setCall(null)
+        status = "Kapalı"
+        if (instance === this) instance = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /** Telefonun kendi zilini susturur; tabletin zili için "silence" komutu ayrıca gider. */
+    private fun silenceLocal() {
+        val c = call ?: return
+        if (c.state != Bridge.STATE_RINGING) return
+        ringSilenced = true
+        CallNotifier.cancelIncoming(this) // çalan sesi kesmek için önce kaldır
+        CallNotifier.incoming(this, c, alert = false)
+    }
+
+    fun send(cmd: String): Boolean {
+        if (cmd == "silence") silenceLocal()
+        val ok = line?.send(Bridge.msg("cmd", "cmd" to cmd)) == true
+        if (!ok) lastResult = "Tablete bağlı değil"
+        return ok
+    }
+
+    // ---- bağlantı ----
+
+    private fun connectLoop() {
+        var delay = 1000L
+        while (running) {
+            val host = resolveHost()
+            if (host == null) {
+                setStatus("Tablet bulunamadı: hotspot'a bağlı mısın?")
+            } else {
+                if (!pinFailed) setStatus("Bağlanıyor: ${host.hostAddress}")
+                try {
+                    session(host)
+                    delay = 1000L
+                } catch (e: Exception) {
+                    Log.w(Bridge.TAG, "Bağlantı koptu: $e")
+                    if (!pinFailed) setStatus("Bağlantı yok: ${e.message ?: e.javaClass.simpleName}")
+                }
+                line = null
+                setCall(null)
+            }
+            if (!running) break
+            try { Thread.sleep(delay) } catch (_: InterruptedException) { break }
+            delay = (delay * 2).coerceAtMost(10_000L)
+        }
+    }
+
+    private fun session(host: InetAddress) {
+        val socket = wifiNetwork()?.socketFactory?.createSocket() ?: Socket()
+        socket.use {
+            it.tcpNoDelay = true
+            it.connect(InetSocketAddress(host, Bridge.PORT), 5000)
+            it.soTimeout = READ_TIMEOUT_MS
+            val l = Line(it)
+            val hello = l.read() ?: throw IllegalStateException("tablet yanıt vermedi")
+            val nonce = hello.optString("nonce")
+            l.send(Bridge.msg("auth", "mac" to Bridge.mac(Bridge.pin(this), nonce), "name" to Build.MODEL))
+            val auth = l.read() ?: throw IllegalStateException("tablet bağlantıyı kapattı")
+            if (auth.optString("t") != "auth_ok") {
+                pinFailed = true
+                setStatus("PIN hatalı: tabletteki PIN'i gir")
+                return
+            }
+            pinFailed = false
+            line = l
+            setStatus("Bağlı: ${host.hostAddress}")
+            while (running) {
+                val m = l.read() ?: break
+                when (m.optString("t")) {
+                    "state" -> onState(m)
+                    "result" -> lastResult = if (m.optBoolean("ok")) null else m.optString("error", "Komut başarısız")
+                }
+            }
+        }
+    }
+
+    private fun onState(m: JSONObject) {
+        val state = m.optString("state", Bridge.STATE_IDLE)
+        if (state == Bridge.STATE_IDLE) {
+            setCall(null)
+            return
+        }
+        val prev = call
+        val since = if (prev != null && prev.state == state) prev.since else System.currentTimeMillis()
+        setCall(
+            Call(
+                state = state,
+                number = m.optString("number").ifEmpty { null },
+                name = m.optString("name").ifEmpty { null },
+                muted = m.optBoolean("muted"),
+                speaker = m.optBoolean("speaker"),
+                test = m.optBoolean("test"),
+                since = since,
+            )
+        )
+    }
+
+    private fun setCall(new: Call?) {
+        val prev = call
+        call = new
+        if (new?.state != Bridge.STATE_RINGING || prev?.state != Bridge.STATE_RINGING) ringSilenced = false
+        when {
+            new == null -> {
+                CallNotifier.cancelIncoming(this)
+                if (prev != null) refreshStatus()
+            }
+            new.state == Bridge.STATE_RINGING -> {
+                // Numara ikinci mesajla gelebilir; zili baştan çaldırmadan güncelle
+                CallNotifier.incoming(this, new, alert = prev?.state != Bridge.STATE_RINGING)
+                if (prev?.state != Bridge.STATE_RINGING && BridgeActivity.visible) {
+                    startActivity(Intent(this, IncomingCallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            }
+            else -> {
+                CallNotifier.cancelIncoming(this)
+                getSystemService(NotificationManager::class.java)
+                    .notify(CallNotifier.STATUS_ID, CallNotifier.ongoing(this, new))
+            }
+        }
+        if (new == null) lastResult = null
+    }
+
+    private fun setStatus(text: String) {
+        status = text
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        if (!running || call != null) return
+        getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, CallNotifier.status(this, status))
+    }
+
+    // ---- tableti bulma ----
+
+    private fun wifiNetwork(): Network? {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        @Suppress("DEPRECATION")
+        return cm.allNetworks.firstOrNull {
+            val caps = cm.getNetworkCapabilities(it) ?: return@firstOrNull false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+    }
+
+    /** Elle girilen adres, yoksa Wi-Fi ağ geçidi (hotspot'u açan tablet). */
+    private fun resolveHost(): InetAddress? {
+        Bridge.manualHost(this).takeIf { it.isNotBlank() }?.let {
+            return try { InetAddress.getByName(it.trim()) } catch (_: Exception) { null }
+        }
+        return gateway(this)
+    }
+
+    companion object {
+        private const val ACTION_STOP = "com.serhanensar.callbridge.CLIENT_STOP"
+        private const val ACTION_CMD = "com.serhanensar.callbridge.CLIENT_CMD"
+        private const val EXTRA_CMD = "cmd"
+        private const val PING_MS = 20_000L
+        private const val READ_TIMEOUT_MS = 45_000
+
+        @Volatile var instance: BridgeClientService? = null
+            private set
+        @Volatile var call: Call? = null
+            private set
+        @Volatile var status = "Kapalı"
+            private set
+        @Volatile var lastResult: String? = null
+        @Volatile var ringSilenced = false
+            private set
+
+        val isRunning get() = instance != null
+        val isConnected get() = instance?.line != null
+
+        fun start(ctx: Context) {
+            ctx.startForegroundService(Intent(ctx, BridgeClientService::class.java))
+        }
+
+        fun stop(ctx: Context) {
+            ctx.startService(Intent(ctx, BridgeClientService::class.java).setAction(ACTION_STOP))
+        }
+
+        fun cmdIntent(ctx: Context, cmd: String): Intent =
+            Intent(ctx, BridgeClientService::class.java).setAction(ACTION_CMD).putExtra(EXTRA_CMD, cmd)
+
+        fun command(cmd: String) {
+            val s = instance
+            if (s == null) {
+                lastResult = "Köprü kapalı"
+                return
+            }
+            thread(isDaemon = true) { s.send(cmd) }
+        }
+
+        fun gateway(ctx: Context): InetAddress? {
+            val cm = ctx.getSystemService(ConnectivityManager::class.java)
+            @Suppress("DEPRECATION")
+            for (n in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(n) ?: continue
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                val gw = cm.getLinkProperties(n)?.routes
+                    ?.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
+                    ?.gateway
+                if (gw != null && !gw.isAnyLocalAddress) return gw
+            }
+            return null
+        }
+    }
+}
