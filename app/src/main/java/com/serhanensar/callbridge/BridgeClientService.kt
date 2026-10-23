@@ -46,13 +46,16 @@ class BridgeClientService : Service() {
     @Volatile private var running = false
     @Volatile private var line: Line? = null
     @Volatile private var pinFailed = false
+    @Volatile private var ringSilenced = false // bu çağrı için zil susturuldu
     private var pinger: ScheduledExecutorService? = null
+    private lateinit var ringer: Ringer
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         Bridge.ensureChannels(this)
+        ringer = Ringer(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -77,7 +80,7 @@ class BridgeClientService : Service() {
 
     private fun startClient() {
         if (running) return
-        val notification = CallNotifier.status(this, "Bağlanıyor…")
+        val notification = CallNotifier.status(this, "Bağlanıyor…", connected = false)
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(CallNotifier.STATUS_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
@@ -105,17 +108,12 @@ class BridgeClientService : Service() {
         stopSelf()
     }
 
-    /** Telefonun kendi zilini susturur; tabletin zili için "silence" komutu ayrıca gider. */
-    private fun silenceLocal() {
-        val c = call ?: return
-        if (c.state != Bridge.STATE_RINGING) return
-        ringSilenced = true
-        CallNotifier.cancelIncoming(this) // çalan sesi kesmek için önce kaldır
-        CallNotifier.incoming(this, c, alert = false)
-    }
-
     fun send(cmd: String): Boolean {
-        if (cmd == "silence") silenceLocal()
+        // Telefonun kendi zili hemen dursun; tabletin zili için komut ayrıca gider
+        if (cmd == "silence" || cmd == "accept" || cmd == "end") {
+            if (call?.state == Bridge.STATE_RINGING) ringSilenced = true
+            ringer.stop()
+        }
         val ok = line?.send(Bridge.msg("cmd", "cmd" to cmd)) == true
         if (!ok) lastResult = "Tablete bağlı değil"
         return ok
@@ -136,6 +134,7 @@ class BridgeClientService : Service() {
                     delay = 1000L
                 } catch (e: Exception) {
                     Log.w(Bridge.TAG, "Bağlantı koptu: $e")
+                    line = null
                     if (!pinFailed) setStatus("Bağlantı yok: ${e.message ?: e.javaClass.simpleName}")
                 }
                 line = null
@@ -201,6 +200,7 @@ class BridgeClientService : Service() {
         val prev = call
         call = new
         if (new?.state != Bridge.STATE_RINGING || prev?.state != Bridge.STATE_RINGING) ringSilenced = false
+        if (new?.state != Bridge.STATE_RINGING) ringer.stop()
         when {
             new == null -> {
                 CallNotifier.cancelIncoming(this)
@@ -208,8 +208,11 @@ class BridgeClientService : Service() {
             }
             new.state == Bridge.STATE_RINGING -> {
                 // Numara ikinci mesajla gelebilir; zili baştan çaldırmadan güncelle
-                CallNotifier.incoming(this, new, alert = prev?.state != Bridge.STATE_RINGING)
-                if (prev?.state != Bridge.STATE_RINGING && BridgeActivity.visible) {
+                val fresh = prev?.state != Bridge.STATE_RINGING
+                val openScreen = fresh && BridgeActivity.visible
+                if (fresh && !ringSilenced) ringer.start()
+                CallNotifier.incoming(this, new, alert = fresh, quiet = openScreen || IncomingCallActivity.visible)
+                if (openScreen) {
                     startActivity(Intent(this, IncomingCallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
             }
@@ -229,7 +232,7 @@ class BridgeClientService : Service() {
 
     private fun refreshStatus() {
         if (!running || call != null) return
-        getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, CallNotifier.status(this, status))
+        getSystemService(NotificationManager::class.java).notify(CallNotifier.STATUS_ID, CallNotifier.status(this, status, connected = line != null))
     }
 
     // ---- tableti bulma ----
@@ -265,8 +268,6 @@ class BridgeClientService : Service() {
         @Volatile var status = "Kapalı"
             private set
         @Volatile var lastResult: String? = null
-        @Volatile var ringSilenced = false
-            private set
 
         val isRunning get() = instance != null
         val isConnected get() = instance?.line != null

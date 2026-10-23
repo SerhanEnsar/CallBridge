@@ -13,23 +13,29 @@ object CallNotifier {
     const val STATUS_ID = 20
     private const val INCOMING_ID = 21
 
-    fun status(ctx: Context, text: String): Notification =
+    /** Çağrı yokken: bağlıysa zincir (hazır), değilse üstü çizili zincir. Ahize yalnızca çağrıda görünür. */
+    fun status(ctx: Context, text: String, connected: Boolean): Notification =
         Notification.Builder(ctx, Bridge.CHANNEL_STATUS)
-            .setSmallIcon(R.drawable.ic_call)
-            .setContentTitle("Çağrı köprüsü")
+            .setSmallIcon(if (connected) R.drawable.ic_link else R.drawable.ic_link_off)
+            .setColor(if (connected) Bridge.COLOR_READY else Bridge.COLOR_OFFLINE)
+            .setContentTitle(if (connected) "Çağrıya hazır" else "Tablete bağlı değil")
             .setContentText(text)
             .setContentIntent(activity(ctx, BridgeActivity::class.java, 0))
             .setOngoing(true)
             .build()
 
-    /** alert=false: zil yeniden çalmadan bildirimi günceller (ör. numara sonradan geldiğinde). */
-    fun incoming(ctx: Context, call: BridgeClientService.Call, alert: Boolean) {
-        val silenced = BridgeClientService.ringSilenced
+    /**
+     * alert=false: üstten kayan bildirimi yeniden göstermeden günceller (ör. numara sonradan gelince).
+     * quiet=true: çağrı ekranı zaten açık; bildirim panelde durur ama ekranın üstüne binmez.
+     */
+    fun incoming(ctx: Context, call: BridgeClientService.Call, alert: Boolean, quiet: Boolean) {
         val screen = activity(ctx, IncomingCallActivity::class.java, 1)
         val answer = command(ctx, "accept", 2)
         val decline = command(ctx, "end", 3)
-        val b = Notification.Builder(ctx, if (silenced) Bridge.CHANNEL_CALL_SILENT else Bridge.CHANNEL_CALL)
-            .setSmallIcon(R.drawable.ic_call)
+        val b = Notification.Builder(ctx, if (quiet) Bridge.CHANNEL_CALL_QUIET else Bridge.CHANNEL_CALL)
+            .setSmallIcon(R.drawable.ic_ringing)
+            .setColor(Bridge.COLOR_READY)
+            .setColorized(true)
             .setContentTitle(call.title)
             .setContentText(subtitle(call, "Tablete gelen çağrı"))
             .setCategory(Notification.CATEGORY_CALL)
@@ -44,15 +50,15 @@ object CallNotifier {
             b.addAction(Notification.Action.Builder(null, "Reddet", decline).build())
             b.addAction(Notification.Action.Builder(null, "Yanıtla", answer).build())
         }
-        val n = b.build()
-        if (!silenced) n.flags = n.flags or Notification.FLAG_INSISTENT // kullanıcı seçene kadar çal
-        ctx.getSystemService(NotificationManager::class.java).notify(INCOMING_ID, n)
+        ctx.getSystemService(NotificationManager::class.java).notify(INCOMING_ID, b.build())
     }
 
     fun ongoing(ctx: Context, call: BridgeClientService.Call): Notification {
         val hangUp = command(ctx, "end", 4)
         val b = Notification.Builder(ctx, Bridge.CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_call)
+            .setColor(Bridge.COLOR_READY)
+            .setColorized(true)
             .setContentTitle(call.title)
             .setContentText(subtitle(call, "Tablette görüşme sürüyor"))
             .setCategory(Notification.CATEGORY_CALL)

@@ -4,8 +4,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.SharedPreferences
-import android.media.AudioAttributes
-import android.media.RingtoneManager
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -42,8 +40,13 @@ object Bridge {
     const val STATE_IDLE = "idle"
 
     const val CHANNEL_STATUS = "bridge_status"
-    const val CHANNEL_CALL = "bridge_call"
-    const val CHANNEL_CALL_SILENT = "bridge_call_silent"
+    // Zil sesini Ringer çalar; kanallar sessizdir. Eski sesli kanallar ensureChannels'ta silinir.
+    const val CHANNEL_CALL = "bridge_call_v2"
+    const val CHANNEL_CALL_QUIET = "bridge_call_quiet"
+
+    // Bildirim renkleri: hazır/çağrı yeşil, bağlantı yok gri
+    const val COLOR_READY = 0xFF28A745.toInt()
+    const val COLOR_OFFLINE = 0xFF8E8E93.toInt()
 
     fun prefs(ctx: Context): SharedPreferences = ctx.getSharedPreferences("callbridge", Context.MODE_PRIVATE)
 
@@ -82,22 +85,18 @@ object Bridge {
         )
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_CALL, "Gelen çağrı", NotificationManager.IMPORTANCE_HIGH).apply {
-                setSound(
-                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
-                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build(),
-                )
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 800, 600, 800, 600)
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-            }
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_CALL_SILENT, "Gelen çağrı (sessiz)", NotificationManager.IMPORTANCE_HIGH).apply {
                 setSound(null, null)
                 enableVibration(false)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             }
         )
+        // Çağrı ekranı zaten açıkken: üstten kayan bildirim çıkmasın
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_CALL_QUIET, "Gelen çağrı (ekran açıkken)", NotificationManager.IMPORTANCE_LOW).apply {
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            }
+        )
+        listOf("bridge_call", "bridge_call_silent").forEach { nm.deleteNotificationChannel(it) }
     }
 
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }

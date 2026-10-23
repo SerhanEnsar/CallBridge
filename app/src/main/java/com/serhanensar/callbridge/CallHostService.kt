@@ -327,7 +327,8 @@ class CallHostService : Service() {
     }
 
     // Test çağrısı: gerçek bir arama olmadan iki cihaz arasındaki akışı dener.
-    private fun startTest(): String? {
+    // Telefondan ya da tabletin kendi ekranından (telefon kilitliyken denemek için) başlatılır.
+    fun startTest(): String? {
         synchronized(this) {
             if (state != Bridge.STATE_IDLE && !test) return "Tablette şu an gerçek bir çağrı var"
             test = true
@@ -379,9 +380,10 @@ class CallHostService : Service() {
             this, 0, Intent(this, BridgeActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, Bridge.CHANNEL_STATUS)
-            .setSmallIcon(R.drawable.ic_call)
-            .setContentTitle("Çağrı köprüsü açık")
-            .setContentText(if (n == 0) "Telefon bekleniyor" else "$n cihaz bağlı")
+            .setSmallIcon(if (n == 0) R.drawable.ic_link_off else R.drawable.ic_link)
+            .setColor(if (n == 0) Bridge.COLOR_OFFLINE else Bridge.COLOR_READY)
+            .setContentTitle(if (n == 0) "Köprü açık, telefon bekleniyor" else "Köprü hazır")
+            .setContentText(if (n == 0) "PIN: ${Bridge.pin(this)}" else "$n telefon bağlı")
             .setContentIntent(open)
             .setOngoing(true)
             .build()

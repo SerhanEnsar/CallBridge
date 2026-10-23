@@ -19,6 +19,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
+import kotlin.concurrent.thread
 
 /** Çağrı köprüsü kurulumu: bu cihazın rolü, PIN, izinler ve aç/kapat. */
 class BridgeActivity : Activity() {
@@ -36,6 +37,7 @@ class BridgeActivity : Activity() {
     private lateinit var pinText: TextView
     private lateinit var hostToggle: TextView
     private lateinit var hostStatus: TextView
+    private lateinit var hostTestButton: TextView
 
     private lateinit var pinInput: EditText
     private lateinit var hostInput: EditText
@@ -141,6 +143,15 @@ class BridgeActivity : Activity() {
         handler.postDelayed({ render() }, 300)
     }
 
+    private fun sendHostTest() {
+        val host = CallHostService.instance ?: return
+        if (CallHostService.peerCount == 0) return
+        thread(isDaemon = true) {
+            val error = host.startTest()
+            if (error != null) runOnUiThread { hostStatus.text = error }
+        }
+    }
+
     private fun newPin() {
         Bridge.prefs(this).edit().putString("pin", Bridge.newPin()).apply()
         render()
@@ -169,6 +180,7 @@ class BridgeActivity : Activity() {
                 CallHostService.lastError != null -> "Kapalı: ${CallHostService.lastError}"
                 else -> "Kapalı"
             })
+            hostTestButton.alpha = if (CallHostService.peerCount > 0) 1f else 0.4f
         }
         if (role == Bridge.ROLE_CLIENT) {
             val on = BridgeClientService.isRunning
@@ -294,7 +306,14 @@ class BridgeActivity : Activity() {
         hostToggle = bigButton { toggleHost() }
         addView(hostToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)).apply { bottomMargin = dp(8) })
         hostStatus = label("", 14f, c.secondary).apply { gravity = Gravity.CENTER }
-        addView(hostStatus, matchWidth(bottom = 18))
+        addView(hostStatus, matchWidth(bottom = 14))
+
+        hostTestButton = label("Telefona test çağrısı gönder", 17f, c.text).apply {
+            gravity = Gravity.CENTER
+            background = rounded(c.neutral, 12f)
+            setOnClickListener { sendHostTest() }
+        }
+        addView(hostTestButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply { bottomMargin = dp(18) })
 
         val options = card()
         val silence = Switch(this@BridgeActivity).apply {

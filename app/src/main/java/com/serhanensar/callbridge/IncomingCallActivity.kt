@@ -49,10 +49,17 @@ class IncomingCallActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        visible = true
+        // Tam ekran ya da bildirimden açıldıysa üstten kayan bildirim ekranın üstünde kalmasın
+        BridgeClientService.call?.takeIf { it.state == Bridge.STATE_RINGING }?.let {
+            CallNotifier.cancelIncoming(this)
+            CallNotifier.incoming(this, it, alert = false, quiet = true)
+        }
         handler.post(ticker)
     }
 
     override fun onPause() {
+        visible = false
         handler.removeCallbacks(ticker)
         super.onPause()
     }
@@ -164,5 +171,10 @@ class IncomingCallActivity : Activity() {
         v.tag = on
         (v.background as GradientDrawable).setColor(if (on) c.text else c.neutral)
         v.setTextColor(if (on) c.background else c.text)
+    }
+
+    companion object {
+        @Volatile var visible = false
+            private set
     }
 }

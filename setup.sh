@@ -172,15 +172,34 @@ fi
 # ---- test çağrısı ----
 
 if [ "$RUN_TEST" = 1 ]; then
-    say "Test çağrısı"
-    tap_text "$CLIENT" "Test çağrısı" || fail "'Test çağrısı' düğmesi bulunamadı"
+    say "Test çağrısı (telefon kilitliyken, tabletten)"
+    "$ADB" -s "$CLIENT" shell input keyevent KEYCODE_SLEEP
     sleep 2
-    screen_has "$CLIENT" "Test çağrısı" && screen_has "$CLIENT" "Yanıtla" && ok "Telefonda çağrı ekranı açıldı" ||
-        echo "  Çağrı ekranı görünmedi (bildirim olarak gelmiş olabilir)"
+    "$ADB" -s "$HOST" shell input keyevent KEYCODE_WAKEUP
+    "$ADB" -s "$HOST" shell am start -W -n "$PKG/.BridgeActivity" >/dev/null
+    sleep 1
+    tap_text "$HOST" "Telefona test çağrısı" || fail "Tablette test düğmesi bulunamadı"
+    sleep 3
+    if "$ADB" -s "$CLIENT" shell dumpsys activity activities | grep -E "topResumedActivity|ResumedActivity:" | grep -q IncomingCallActivity; then
+        ok "Kilit ekranında çağrı ekranı açıldı"
+    else
+        echo "  Çağrı ekranı öne gelmedi"
+    fi
+    "$ADB" -s "$CLIENT" exec-out screencap -p > "$OUT/cb-ringing.png"
+    if "$ADB" -s "$CLIENT" shell dumpsys audio | grep -A1 "USAGE_NOTIFICATION_RINGTONE" | grep -q "state:started"; then
+        ok "Telefon çalıyor"
+    fi
     tap_text "$CLIENT" "Yanıtla" && sleep 1.5
     screen_has "$CLIENT" "Görüşmede" && ok "Yanıtla komutu tabletten döndü" || echo "  'Görüşmede' görünmedi"
+    if "$ADB" -s "$CLIENT" shell dumpsys audio | grep -A1 "USAGE_NOTIFICATION_RINGTONE" | grep -q "state:started"; then
+        echo "  Zil yanıttan sonra hâlâ çalıyor"
+    else
+        ok "Zil durdu"
+    fi
+    "$ADB" -s "$CLIENT" exec-out screencap -p > "$OUT/cb-incall.png"
     tap_text "$CLIENT" "Kapat" && sleep 1.5
-    "$ADB" -s "$HOST" logcat -d -s CallBridge | grep -E "Komut (accept|end)" | sed 's/^/  tablet: /'
+    "$ADB" -s "$HOST" logcat -d -s CallBridge | grep -E "Komut (accept|end)" | tail -2 | sed 's/^/  tablet: /'
+    echo "  Ekran görüntüleri: $OUT/cb-ringing.png, $OUT/cb-incall.png"
 fi
 
 say "Hazır"
