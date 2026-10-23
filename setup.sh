@@ -5,6 +5,7 @@
 #   ./setup.sh <tablet> <telefon>   # adb seri numaralarıyla
 #   ./setup.sh --test               # kurulumdan sonra test çağrısı da dener
 #   ./setup.sh relay [tablet]       # yalnızca tablette ses aktarıcısını başlatır
+#   ./setup.sh relay noredirect     # aktarımda tablet hoparlörünü çağrıdan ayırma (yalnızca kıs)
 #
 # Ses aktarıcısı shell yetkisiyle çalışır ve tablet yeniden başlayana kadar açık kalır;
 # her açılıştan sonra tablet USB'ye takılıyken bir kez ./setup.sh relay çalıştırılır.
@@ -22,11 +23,13 @@ RELAY_LOG=/data/local/tmp/callbridge-relay.log
 
 RUN_TEST=0
 RELAY_ONLY=0
+RELAY_OPT=""
 ARGS=()
 for a in "$@"; do
     case "$a" in
         --test) RUN_TEST=1 ;;
         relay) RELAY_ONLY=1 ;;
+        noredirect) RELAY_OPT=noredirect ;;
         *) ARGS+=("$a") ;;
     esac
 done
@@ -42,7 +45,7 @@ start_relay() {
     uid=$("$ADB" -s "$dev" shell pm list packages -U "$PKG" | sed -n "s/^package:$PKG uid:\([0-9]*\).*/\1/p" | tr -d '\r')
     [ -n "$apk" ] && [ -n "$uid" ] || fail "Tablette CallBridge kurulu değil"
     # Süreç adı (argv0) "callbridge-relay"; ^ ile yalnızca o eşleşir, bu komutun kendisi değil
-    "$ADB" -s "$dev" shell "pkill -f '^callbridge-relay'; sleep 0.5; CLASSPATH=$apk setsid nohup app_process / $PKG.RelayDaemon $uid > $RELAY_LOG 2>&1 < /dev/null &"
+    "$ADB" -s "$dev" shell "pkill -f '^callbridge-relay'; sleep 0.5; CLASSPATH=$apk setsid nohup app_process / $PKG.RelayDaemon $uid $RELAY_OPT > $RELAY_LOG 2>&1 < /dev/null &"
     sleep 2
     if "$ADB" -s "$dev" shell pgrep -f "'^callbridge-relay'" >/dev/null; then
         ok "Ses aktarıcısı çalışıyor ($("$ADB" -s "$dev" shell head -1 "$RELAY_LOG" | tr -d '\r'))"

@@ -27,6 +27,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
@@ -200,9 +201,12 @@ class CallHostService : Service() {
         }
     }
 
+    /** Çağrı durumu yayını ana iş parçacığından da gelir; ağa yazmak tek bir arka plan iş parçacığında, sırayla. */
+    private val sender = Executors.newSingleThreadExecutor()
+
     private fun broadcast() {
         val m = stateMessage()
-        peers.forEach { it.line.send(m) }
+        sender.execute { peers.forEach { it.line.send(m) } }
     }
 
     private fun stateMessage(): JSONObject = synchronized(this) {

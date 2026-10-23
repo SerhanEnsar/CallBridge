@@ -44,19 +44,30 @@ object RelayDaemon {
     private const val FRAME = RATE / 50 // 20 ms
     private const val MODE_IN_CALL = 2
 
+    private const val MODE_NORMAL = 0
+    private const val MODE_CALL_REDIRECT = 5
+
     private lateinit var svc: Any
     @Volatile private var session: Session? = null
+
+    /**
+     * true: aktarım sürerken ses modu CALL_REDIRECT'e alınır; tablet hoparlörü ve mikrofonu çağrıdan
+     * ayrılır (en kısık seste bile çalmasın diye). Bu modda sesi alma/verme yolu aynı kalır.
+     */
+    private var redirect = true
+    private val modeToken = android.os.Binder()
 
     @JvmStatic
     fun main(args: Array<String>) {
         val allowedUid = args.getOrNull(0)?.toIntOrNull() ?: error("kullanım: RelayDaemon <callbridge-uid>")
         check(Build.VERSION.SDK_INT >= 33) { "Android 13 ve üstü gerekli" }
+        redirect = args.getOrNull(1) != "noredirect"
         try {
             Process::class.java.getMethod("setArgV0", String::class.java).invoke(null, "callbridge-relay")
         } catch (_: Exception) {
         }
         svc = audioService()
-        log("başladı; izinli uid=$allowedUid, çağrı sesi desteği=${call("isPstnCallAudioInterceptable")}")
+        log("başladı; izinli uid=$allowedUid, çağrı sesi desteği=${call("isPstnCallAudioInterceptable")}, tableti sustur=$redirect")
         Runtime.getRuntime().addShutdownHook(Thread { session?.stop("kapanış") })
         thread(isDaemon = true, name = "call-watch") { watchCallEnd() }
 
@@ -117,13 +128,16 @@ object RelayDaemon {
         }
     }
 
-    /** Çağrı bitince (mod IN_CALL'dan çıkınca) aktarımı kendiliğinden durdur. */
+    /**
+     * Çağrı bitince aktarımı kendiliğinden durdur. CALL_REDIRECT'teyken mod bizim; çağrının
+     * sürüp sürmediğine telefon servisinin çağrı durumundan bakılır.
+     */
     private fun watchCallEnd() {
         var idle = 0
         while (true) {
             Thread.sleep(1000)
             val s = session ?: continue
-            idle = if (call("getMode") == MODE_IN_CALL) 0 else idle + 1
+            idle = if (callActive()) 0 else idle + 1
             if (idle >= 2) {
                 s.stop("çağrı bitti")
                 idle = 0
@@ -140,6 +154,7 @@ object RelayDaemon {
         private var downPackets = 0L
         private var upPackets = 0L
         private var upDropped = 0L
+        private var redirected = false
 
         fun start() {
             val record = AudioRecord.Builder()
@@ -169,6 +184,10 @@ object RelayDaemon {
             setMicMute(true)
             prevVolume = call("getStreamVolume", AudioManager.STREAM_VOICE_CALL) as Int
             setVoiceVolume(call("getStreamMinVolume", AudioManager.STREAM_VOICE_CALL) as Int)
+            if (redirect) {
+                setMode(MODE_CALL_REDIRECT)
+                redirected = true
+            }
 
             running = true
             threads += thread(name = "downlink") { downlink(record) }
@@ -182,6 +201,9 @@ object RelayDaemon {
             running = false
             threads.forEach { it.join(1500) }
             threads.clear()
+            // NORMAL istemek kendi mod isteğimizi geri çeker; çağrı sürüyorsa kendi moduna döner
+            if (redirected) try { setMode(MODE_NORMAL) } catch (_: Exception) {}
+            redirected = false
             try { setMicMute(false) } catch (_: Exception) {}
             if (prevVolume >= 0) try { setVoiceVolume(prevVolume) } catch (_: Exception) {}
             if (session === this) session = null
@@ -193,6 +215,7 @@ object RelayDaemon {
             val pcm = ShortArray(FRAME)
             val buf = ByteArray(4 + FRAME * 2)
             var seq = 0
+            var sum = 0.0
             try {
                 rec.startRecording()
                 while (running) {
@@ -202,6 +225,11 @@ object RelayDaemon {
                     for (k in 0 until n) {
                         buf[4 + 2 * k] = pcm[k].toInt().toByte()
                         buf[5 + 2 * k] = (pcm[k].toInt() shr 8).toByte()
+                        sum += pcm[k].toDouble() * pcm[k]
+                    }
+                    if (seq % 250 == 249) { // 5 sn: karşı tarafın ses seviyesi (0'a yakınsa ses gelmiyor)
+                        log("  karşı taraf rms=${Math.sqrt(sum / (250.0 * FRAME)).toInt()} mod=${call("getMode")}")
+                        sum = 0.0
                     }
                     sock.send(DatagramPacket(buf, 4 + n * 2, phone, Bridge.AUDIO_PORT))
                     seq++
@@ -297,6 +325,28 @@ object RelayDaemon {
     }
 
     private fun setMicMute(on: Boolean) = callFill("setMicrophoneMute", 1, on)
+
+    /** IAudioService.setMode(int mode, IBinder cb, String callingPackage); süreç ölürse istek düşer. */
+    private fun setMode(mode: Int) {
+        val m = svc.javaClass.methods.first { it.name == "setMode" && it.parameterCount == 3 }
+        m.invoke(svc, mode, modeToken, "com.android.shell")
+    }
+
+    /** Telefon servisine göre süren bir çağrı var mı (ses modundan bağımsız). */
+    private fun callActive(): Boolean {
+        if (!redirect) return call("getMode") == MODE_IN_CALL
+        return try {
+            val b = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java)
+                .invoke(null, "telecom") as IBinder
+            val t = Class.forName("com.android.internal.telecom.ITelecomService\$Stub")
+                .getMethod("asInterface", IBinder::class.java).invoke(null, b)!!
+            t.javaClass.methods.first { it.name == "isInCall" && it.parameterCount == 2 }
+                .invoke(t, "com.android.shell", null) as Boolean
+        } catch (e: Exception) {
+            log("çağrı durumu okunamadı: $e")
+            true // emin olamıyorsak durdurma; CallBridge çağrı bitince ayrıca durdurur
+        }
+    }
 
     private fun setVoiceVolume(index: Int) = callFill("setStreamVolume", 3, AudioManager.STREAM_VOICE_CALL, index, 0)
 
